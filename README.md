@@ -60,8 +60,11 @@ the test ends: for migrations on a fresh instance, and the way this package test
 
 ## Development
 
-The suite needs a PostgreSQL server whose role can create databases:
+Tools are pinned by [mise](https://mise.jdx.dev). The suite needs a PostgreSQL server whose
+role can create databases (`PGCLEANER_TEST_URL`, default `127.0.0.1:15432`):
 
 ```sh
-PGCLEANER_TEST_URL=postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable mise run test
+mise run test          # go test -race -shuffle=on
+mise run check         # golangci-lint, typos, gitleaks, actionlint, zizmor
+mise run check:vulns   # govulncheck (nightly in CI, not part of check)
 ```

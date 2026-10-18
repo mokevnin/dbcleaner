@@ -1,6 +1,10 @@
 [tools]
 go = "latest"
 golangci-lint = "2"
+gitleaks = "latest"
+jactionlint = "latest"
+typos = "latest"
+zizmor = "latest"
 
 [env]
 # A server whose role can create databases; the suite makes a scratch database per test.
@@ -10,6 +14,22 @@ PGCLEANER_TEST_URL = "postgres://postgres@127.0.0.1:15432/postgres?sslmode=disab
 description = "Run the suite (needs a PostgreSQL server at PGCLEANER_TEST_URL)"
 run = "go test -race -shuffle=on ./..."
 
-[tasks.check]
+[tasks."check:go"]
 description = "gofmt, vet and golangci-lint"
 run = "golangci-lint run"
+
+[tasks."check:typos"]
+description = "Spelling in code, docs and comments"
+run = "typos"
+
+[tasks."check:secrets"]
+description = "Secrets in history, and the workflow linters"
+run = ["gitleaks git --no-banner --redact", "jactionlint", "zizmor --no-progress .github"]
+
+[tasks."check:vulns"]
+description = "No call to a known-vulnerable dependency or stdlib function (network: the vulnerability database)"
+run = "go tool govulncheck ./..."
+
+[tasks.check]
+description = "Everything that checks the diff; vulns run on a schedule instead"
+depends = ["check:go", "check:typos", "check:secrets"]
