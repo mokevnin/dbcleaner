@@ -1,0 +1,15 @@
+[tools]
+go = "latest"
+golangci-lint = "2"
+
+[env]
+# A server whose role can create databases; the suite makes a scratch database per test.
+PGCLEANER_TEST_URL = "postgres://postgres@127.0.0.1:15432/postgres?sslmode=disable"
+
+[tasks.test]
+description = "Run the suite (needs a PostgreSQL server at PGCLEANER_TEST_URL)"
+run = "go test -race -shuffle=on ./..."
+
+[tasks.check]
+description = "gofmt, vet and golangci-lint"
+run = "golangci-lint run"

@@ -1,0 +1,12 @@
+version: '2'
+formatters:
+  enable:
+    - gofmt
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - noctx
+    - sqlclosecheck
+    - rowserrcheck
+    - usetesting
