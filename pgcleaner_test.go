@@ -14,7 +14,7 @@ import (
 
 // The suite needs a PostgreSQL server whose role can create databases; every test
 // gets its own scratch database on it.
-func serverURL(t *testing.T) string {
+func serverURL(t testing.TB) string {
 	t.Helper()
 	url := os.Getenv("PGCLEANER_TEST_URL")
 	require.NotEmpty(t, url, "set PGCLEANER_TEST_URL to a PostgreSQL URL, e.g. postgres://postgres@127.0.0.1:5432/postgres")

@@ -97,6 +97,89 @@ with `WithGuard(func(name string) bool)`, or pass `nil` to allow everything.
 `ScratchDatabase(t, adminURL)` creates an empty, uniquely named database and drops it when
 the test ends: for migrations on a fresh instance, and the way this package tests itself.
 
+## Example
+
+A hypothetical `users` package whose `Service` takes a `*sql.DB`. The test package builds one
+`Cleaner`; every test asks it for a database and uses it like any other.
+
+```go
+package users_test
+
+import (
+	"context"
+	"database/sql"
+	"os"
+	"testing"
+
+	"github.com/mokevnin/pgcleaner"
+	"github.com/stretchr/testify/require"
+
+	"example.com/app/users"
+)
+
+// One Cleaner per test package.
+var cleaner = pgcleaner.New(os.Getenv("TEST_DATABASE_URL"),
+	pgcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
+		// Once per process, committed: migrate the schema, load the fixtures.
+		return migrate(ctx, db)
+	}),
+)
+
+func TestRegisterStoresTheUser(t *testing.T) {
+	t.Parallel()
+	db := cleaner.DB(t) // the baseline, plus nothing: rolled back when the test ends
+	svc := users.NewService(db)
+
+	_, err := svc.Register(t.Context(), "bob@example.com")
+	require.NoError(t, err)
+
+	got, err := svc.ByEmail(t.Context(), "bob@example.com")
+	require.NoError(t, err)
+	require.Equal(t, "bob@example.com", got.Email)
+}
+
+func TestRegisterRejectsADuplicate(t *testing.T) {
+	t.Parallel()
+	svc := users.NewService(cleaner.DB(t))
+	_, err := svc.Register(t.Context(), "ann@example.com")
+	require.NoError(t, err)
+
+	_, err = svc.Register(t.Context(), "ann@example.com")
+
+	// Bob from the test above is not here, and Ann will not be in the next one.
+	require.ErrorIs(t, err, users.ErrEmailTaken)
+}
+```
+
+`Register` may open its own `db.BeginTx` inside: it becomes a savepoint of the test's
+transaction and is still undone with it.
+
+## How fast is it?
+
+One test's whole lifecycle against a 60-table schema: get a database at the baseline, insert
+two rows, undo it. Measured with `go test -bench .` (see `bench_test.go`), Apple M4, PostgreSQL 18.6
+on localhost:
+
+| Approach                            | Per test | Grows with                        |
+| ----------------------------------- | -------- | --------------------------------- |
+| `Transaction()`                     | ~3.4 ms  | nothing (mostly one connection)   |
+| `Deletion()`                        | ~1.5 ms  | tables and rows left behind       |
+| `Truncation()`                      | ~36 ms   | the number of tables              |
+| `CREATE DATABASE … TEMPLATE` + drop | ~78 ms   | the size of the template database |
+
+Read it as orders of magnitude, not a ranking to copy: with two rows and a warm pool `Deletion`
+wins by a couple of milliseconds, and it loses as tests write to more tables. What does not
+change is that `Transaction` costs the same however big the schema or the test's data is, and
+it is the only one whose tests can run with `t.Parallel()` against one database (as long as
+they do not contend for the same rows), because every session has its own transaction.
+A database per test from a template is exact and needs no cleanup logic, but at tens of
+milliseconds it is the slowest and adds up over a few thousand tests.
+
+[testcontainers](https://golang.testcontainers.org) is not an alternative to any of these: it
+provisions the server (about 1.3 s for a PostgreSQL 17 container with a warm image on the same
+machine), once per suite. pgcleaner is what runs inside it, per test. Start the container in
+`TestMain`, point the `Cleaner` at it, and keep the isolation here.
+
 ## Development
 
 Tools are pinned by [mise](https://mise.jdx.dev). The suite needs a PostgreSQL server whose
