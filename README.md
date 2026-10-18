@@ -142,6 +142,37 @@ strategies in parallel against one database.
 `scratch`, so a URL left pointing at a development database is not emptied. Replace the check
 with `WithGuard(func(name string) bool)`, or pass `nil` to allow everything.
 
+### Parallel test packages
+
+`go test ./...` runs one process per package. Against one database they fight over the same
+rows and locks, so the usual fix is `-p 1`, which also serializes building and linking the test
+binaries (the slow half of many suites). `WithTemplate` gives every process a database of its
+own instead:
+
+```go
+var cleaner = pgcleaner.New(os.Getenv("DATABASE_URL"),
+	// The schema, built once per version into a template database.
+	pgcleaner.WithTemplate(schemaHash, func(ctx context.Context, db *sql.DB, url string) error {
+		return migrate(ctx, db)
+	}),
+	// What differs per process: runs on the process's own database every time.
+	pgcleaner.WithSetup(loadFixtures),
+)
+```
+
+The databases are siblings of the one in the URL: `<name>_tpl_<hash>`, the template, built by
+whichever process comes first and under an advisory lock; and `<name>_w<i>`, the workers. A
+process leases the lowest free worker with a session advisory lock, which the server releases
+when the process ends however it ends, so there is nothing to clean up and the number of
+databases stays at the number of concurrent processes. A worker is cloned from the template when
+it is missing or was cloned from an older version. Bump the version (a hash of the migration
+files, say) when the schema changes; older templates are dropped.
+
+Keep what has relative dates in `WithSetup`, not in `build`: a template is built once and
+lives on. `cleaner.URL(ctx)` is the database to hand to code that opens its own connection.
+The role needs the right to create databases. In the suite this was extracted from, 131 s with
+`-p 1` became about 30 s.
+
 ### Scratch databases
 
 `ScratchDatabase(t, adminURL)` creates an empty, uniquely named database and drops it when

@@ -53,8 +53,8 @@ func ScratchDatabase(t testing.TB, adminURL string) string {
 	// Readable prefix from the test's name, then a hash that also covers the process
 	// and a counter: packages run in parallel, and a test may ask for several.
 	readable := strings.Trim(unsafeName.ReplaceAllString(strings.ToLower(t.Name()), "_"), "_")
-	if len(readable) > 36 {
-		readable = readable[:36]
+	if len(readable) > 24 {
+		readable = readable[:24]
 	}
 	h := fnv.New32a()
 	_, _ = fmt.Fprintf(h, "%s/%d/%d", t.Name(), os.Getpid(), scratchCounter.Add(1))

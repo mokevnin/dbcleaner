@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib" // the default driver
 )
 
@@ -33,6 +34,13 @@ type Cleaner struct {
 	strategy Strategy
 	setup    func(context.Context, *sql.DB) error
 	guard    func(database string) bool
+
+	templateVersion string
+	templateBuild   func(ctx context.Context, db *sql.DB, url string) error
+	// leaseConn holds the worker database lease; see WithTemplate. A bare connection, not
+	// a pool: it has no goroutine, so a first session started inside a testing/synctest
+	// bubble leaves nothing behind in it.
+	leaseConn *pgx.Conn
 
 	setupOnce sync.Once
 	setupErr  error
@@ -90,17 +98,21 @@ func New(url string, opts ...Option) *Cleaner {
 	return c
 }
 
-// Close releases the shared pool the committing strategies use. A Cleaner that only
-// ever ran [Transaction] holds nothing to close.
+// Close releases the shared pool the committing strategies use and the worker database
+// lease. A Cleaner that only ran [Transaction] on its own database holds nothing to close.
 func (c *Cleaner) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.real == nil {
-		return nil
+	var errs []error
+	if c.real != nil {
+		errs = append(errs, c.real.Close())
+		c.real = nil
 	}
-	err := c.real.Close()
-	c.real = nil
-	return err
+	if c.leaseConn != nil {
+		errs = append(errs, c.leaseConn.Close(context.Background()))
+		c.leaseConn = nil
+	}
+	return errors.Join(errs...)
 }
 
 // Session is one test's view of the database, from [Cleaner.Start] to [Session.Clean].
@@ -147,18 +159,28 @@ func (c *Cleaner) start(ctx context.Context, s Strategy) (*Session, error) {
 	return s.start(ctx, c)
 }
 
-// ensureSetup runs the setup callback once and remembers its error.
+// ensureSetup leases the worker database (WithTemplate) and runs the setup callback,
+// once, and remembers the error. The setup runs on a pool of its own that is closed
+// afterwards, so it leaves no goroutine behind.
 func (c *Cleaner) ensureSetup(ctx context.Context) error {
 	c.setupOnce.Do(func() {
+		ctx := context.WithoutCancel(ctx)
+		if c.templateBuild != nil {
+			if err := c.lease(ctx); err != nil {
+				c.setupErr = fmt.Errorf("pgcleaner: lease: %w", err)
+				return
+			}
+		}
 		if c.setup == nil {
 			return
 		}
-		db, err := c.committing(ctx)
+		db, err := sql.Open(c.driver, c.url)
 		if err != nil {
-			c.setupErr = err
+			c.setupErr = fmt.Errorf("pgcleaner: open: %w", err)
 			return
 		}
-		if err := c.setup(context.WithoutCancel(ctx), db); err != nil {
+		defer func() { _ = db.Close() }()
+		if err := c.setup(ctx, db); err != nil {
 			c.setupErr = fmt.Errorf("pgcleaner: setup: %w", err)
 		}
 	})
