@@ -7,6 +7,11 @@ on:
 
 permissions: {}
 
+# A release is never cancelled halfway: a newer run waits for the running one.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release-please:
     runs-on: ubuntu-latest
