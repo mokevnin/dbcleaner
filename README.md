@@ -56,49 +56,6 @@ migration bookkeeping tables of golang-migrate, goose, Atlas, river, Rails and t
 
 ## Usage
 
-```go
-var cleaner = pgcleaner.New(os.Getenv("DATABASE_URL"),
-	pgcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
-		// once per process, committed: migrate the schema, load the fixtures
-		return migrate(ctx, db)
-	}),
-)
-
-func TestCreateUser(t *testing.T) {
-	db := cleaner.DB(t) // rolled back when the test ends
-	// hand db to the code under test
-}
-```
-
-One strategy before the suite, another per test, as in DatabaseCleaner's `clean_with`:
-
-```go
-func TestMain(m *testing.M) {
-	_ = cleaner.CleanWith(context.Background(), pgcleaner.Truncation())
-	os.Exit(m.Run())
-}
-```
-
-Without `testing`, use `Start` / `Session.Clean`, or `Cleaning(ctx, func(db *sql.DB) error)`.
-
-`Transaction` limits a session to one connection, because a second one would open a second
-transaction that does not see the first one's writes. The code under test may still call
-`Begin`/`Commit`/`Rollback`: they become savepoints. Do not run sessions of the committing
-strategies in parallel against one database.
-
-### Safety
-
-`Truncation` and `Deletion` refuse to run unless the database name contains `test`, `e2e` or
-`scratch`, so a URL left pointing at a development database is not emptied. Replace the check
-with `WithGuard(func(name string) bool)`, or pass `nil` to allow everything.
-
-### Scratch databases
-
-`ScratchDatabase(t, adminURL)` creates an empty, uniquely named database and drops it when
-the test ends: for migrations on a fresh instance, and the way this package tests itself.
-
-## Example
-
 A hypothetical `users` package whose `Service` takes a `*sql.DB`. The test package builds one
 `Cleaner`; every test asks it for a database and uses it like any other.
 
@@ -127,8 +84,7 @@ var cleaner = pgcleaner.New(os.Getenv("TEST_DATABASE_URL"),
 
 func TestRegisterStoresTheUser(t *testing.T) {
 	t.Parallel()
-	db := cleaner.DB(t) // the baseline, plus nothing: rolled back when the test ends
-	svc := users.NewService(db)
+	svc := users.NewService(cleaner.DB(t)) // the baseline; rolled back when the test ends
 
 	_, err := svc.Register(t.Context(), "bob@example.com")
 	require.NoError(t, err)
@@ -153,6 +109,43 @@ func TestRegisterRejectsADuplicate(t *testing.T) {
 
 `Register` may open its own `db.BeginTx` inside: it becomes a savepoint of the test's
 transaction and is still undone with it.
+
+When a test cannot use the handle it is given (the code under test runs in another process or
+on its own pool), pick another strategy for that package:
+
+```go
+var cleaner = pgcleaner.New(url,
+	pgcleaner.WithStrategy(pgcleaner.Truncation(pgcleaner.Except("countries"))),
+	pgcleaner.WithSetup(migrateAndSeed),
+)
+```
+
+One strategy before the suite, another per test, as in DatabaseCleaner's `clean_with`:
+
+```go
+func TestMain(m *testing.M) {
+	_ = cleaner.CleanWith(context.Background(), pgcleaner.Truncation())
+	os.Exit(m.Run())
+}
+```
+
+Without `testing`, use `Start` / `Session.Clean`, or `Cleaning(ctx, func(db *sql.DB) error)`.
+
+`Transaction` limits a session to one connection, because a second one would open a second
+transaction that does not see the first one's writes. The code under test may still call
+`Begin`/`Commit`/`Rollback`: they become savepoints. Do not run sessions of the committing
+strategies in parallel against one database.
+
+### Safety
+
+`Truncation` and `Deletion` refuse to run unless the database name contains `test`, `e2e` or
+`scratch`, so a URL left pointing at a development database is not emptied. Replace the check
+with `WithGuard(func(name string) bool)`, or pass `nil` to allow everything.
+
+### Scratch databases
+
+`ScratchDatabase(t, adminURL)` creates an empty, uniquely named database and drops it when
+the test ends: for migrations on a fresh instance, and the way this package tests itself.
 
 ## How fast is it?
 
