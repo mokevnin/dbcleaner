@@ -5,6 +5,45 @@ Ruby's [DatabaseCleaner](https://github.com/DatabaseCleaner/database_cleaner), b
 [go-txdb](https://github.com/DATA-DOG/go-txdb). It knows nothing about your ORM: it hands
 out a `*sql.DB` and runs one setup callback (migrations, fixtures) per process.
 
+## Why?
+
+Tests that touch a database must not leak into each other: a row one test inserts cannot
+change what the next one sees, or the suite passes in one order and fails in another. There
+are three ways to get there, and most ecosystems ship an answer to this out of the box:
+
+1. **Run each test in a transaction and roll it back.** Nothing is ever committed, so there
+   is nothing to clean, and it costs almost nothing: a rollback is far cheaper than
+   recreating data. This is the default almost everywhere:
+   Rails (`use_transactional_tests`), Django (`TestCase`), Laravel (`RefreshDatabase`,
+   `DatabaseTransactions`), Spring (`@Transactional` tests roll back by default) and Elixir's
+   Ecto (`SQL.Sandbox`).
+2. **Truncate or delete the tables after the test.** Slower, but the data is really
+   committed, so a second connection can see it. This is what those same frameworks fall back
+   to when a test cannot share one connection: Django's `TransactionTestCase`, Laravel's
+   `DatabaseTruncation`, and the `:truncation` and `:deletion` strategies of Ruby's
+   [DatabaseCleaner](https://github.com/DatabaseCleaner/database_cleaner), which this package
+   is modeled on.
+3. **Create a fresh database per test.** Fully isolated, but creating and migrating one takes
+   far longer than a rollback.
+
+Go's standard `testing` package has no such thing, so every project writes its own: open a
+`*sql.Tx` in each test, hand it around, remember to roll back. That works until the code under
+test opens a transaction of its own (a `*sql.Tx` cannot be nested), or the code takes a
+`*sql.DB` and not a `*sql.Tx`, and then it is rewritten per project.
+
+[go-txdb](https://github.com/DATA-DOG/go-txdb) solves the hard part of the first approach: it
+is a `database/sql` driver that puts the whole connection inside one transaction, turns the
+code's own `Begin`/`Commit`/`Rollback` into savepoints, and rolls back on `Close`. The code
+under test just receives a `*sql.DB`. pgcleaner adds what is left around it, the same way
+DatabaseCleaner wraps Ruby's primitives: the choice between the strategies above, a setup
+step that runs once per process (migrations, fixtures), the table lists and foreign-key order
+for truncation and deletion, a guard against wiping the wrong database, and scratch databases.
+
+**Pick `Transaction` unless the test cannot use the handle it is given.** The usual reason is
+code that talks to the database over its own connection: an HTTP server in another process,
+a worker with its own pool, a `LISTEN`/`NOTIFY` consumer. Their connections cannot see an
+uncommitted transaction, so use `Truncation` or `Deletion` for those tests.
+
 | Strategy        | How a test is undone                          | Use when                                                            |
 | --------------- | --------------------------------------------- | ------------------------------------------------------------------- |
 | `Transaction()` | the whole test runs in one rolled-back tx     | the default; the test uses the `*sql.DB` it is given                |
