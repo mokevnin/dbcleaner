@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/mokevnin/dbcleaner"
+	"github.com/mokevnin/dbcleaner/postgres"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,7 +39,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 // and a second, plain connection to the same database: what another process sees.
 func fresh(t *testing.T, strategy dbcleaner.Strategy, opts ...dbcleaner.Option) (*dbcleaner.Cleaner, *sql.DB) {
 	t.Helper()
-	url := dbcleaner.ScratchDatabase(t, serverURL(t))
+	url := postgres.ScratchDatabase(t, serverURL(t))
 	opts = append([]dbcleaner.Option{dbcleaner.WithStrategy(strategy), dbcleaner.WithSetup(migrate)}, opts...)
 	c := dbcleaner.New(url, opts...)
 	t.Cleanup(func() { require.NoError(t, c.Close()) })
@@ -291,8 +292,8 @@ func TestScratchDatabaseIsEmptyUniqueAndDroppedAfterTheTest(t *testing.T) {
 
 	var first, second string
 	t.Run("creates", func(t *testing.T) {
-		first = dbcleaner.ScratchDatabase(t, serverURL(t))
-		second = dbcleaner.ScratchDatabase(t, serverURL(t))
+		first = postgres.ScratchDatabase(t, serverURL(t))
+		second = postgres.ScratchDatabase(t, serverURL(t))
 		require.NotEqual(t, first, second)
 
 		db, err := sql.Open("pgx", first)

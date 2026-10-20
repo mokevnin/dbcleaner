@@ -9,6 +9,7 @@ import (
 	"testing/synctest"
 
 	"github.com/mokevnin/dbcleaner"
+	"github.com/mokevnin/dbcleaner/postgres"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,7 +27,7 @@ func leasing(url, version string, build func(context.Context, *sql.DB, string) e
 // dropped with it, and the name of that base.
 func scratchBase(t *testing.T) (url, name string) {
 	t.Helper()
-	url = dbcleaner.ScratchDatabase(t, serverURL(t))
+	url = postgres.ScratchDatabase(t, serverURL(t))
 	name = databaseName(t, url)
 	t.Cleanup(func() {
 		admin, err := sql.Open("pgx", serverURL(t))

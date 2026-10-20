@@ -1,4 +1,4 @@
-// Package dbcleaner puts a PostgreSQL database back to its baseline after a test,
+// Package dbcleaner puts a database back to its baseline after a test,
 // the way Ruby's DatabaseCleaner does: pick a strategy, start a session, clean it.
 //
 // Three strategies are built in:
@@ -12,6 +12,9 @@
 //
 // [Null] cleans nothing. The package knows nothing about an ORM: it hands out a
 // *database/sql.DB and runs one setup callback (migrations, fixtures) per process.
+//
+// What differs between engines is a [Dialect]; the one for a URL is picked by its scheme
+// among those the program imported (import _ "github.com/mokevnin/dbcleaner/postgres").
 package dbcleaner
 
 import (
@@ -21,9 +24,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-
-	"github.com/jackc/pgx/v5"
-	_ "github.com/jackc/pgx/v5/stdlib" // the default driver
 )
 
 // Cleaner starts cleaning sessions against one database. Build it once per test
@@ -31,16 +31,15 @@ import (
 type Cleaner struct {
 	url      string
 	driver   string
+	dialect  Dialect
 	strategy Strategy
 	setup    func(context.Context, *sql.DB) error
 	guard    func(database string) bool
 
 	templateVersion string
 	templateBuild   func(ctx context.Context, db *sql.DB, url string) error
-	// leaseConn holds the worker database lease; see WithTemplate. A bare connection, not
-	// a pool: it has no goroutine, so a first session started inside a testing/synctest
-	// bubble leaves nothing behind in it.
-	leaseConn *pgx.Conn
+	// release gives back the worker database lease; see WithTemplate.
+	release func() error
 
 	setupOnce sync.Once
 	setupErr  error
@@ -57,8 +56,8 @@ type Option func(*Cleaner)
 // is [Transaction].
 func WithStrategy(s Strategy) Option { return func(c *Cleaner) { c.strategy = s } }
 
-// WithDriver names the database/sql driver the URL is opened with. The default is
-// "pgx", registered by this package; any other driver must be imported by the caller.
+// WithDriver names the database/sql driver the URL is opened with. The default is the
+// dialect's own; any other driver must be imported by the caller.
 func WithDriver(name string) Option { return func(c *Cleaner) { c.driver = name } }
 
 // WithSetup registers the callback that brings the database to its baseline:
@@ -91,7 +90,7 @@ func DefaultGuard(database string) bool {
 // New returns a Cleaner for the database at url. Nothing connects until the first
 // session starts.
 func New(url string, opts ...Option) *Cleaner {
-	c := &Cleaner{url: url, driver: "pgx", strategy: Transaction(), guard: DefaultGuard}
+	c := &Cleaner{url: url, strategy: Transaction(), guard: DefaultGuard}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -108,9 +107,9 @@ func (c *Cleaner) Close() error {
 		errs = append(errs, c.real.Close())
 		c.real = nil
 	}
-	if c.leaseConn != nil {
-		errs = append(errs, c.leaseConn.Close(context.Background()))
-		c.leaseConn = nil
+	if c.release != nil {
+		errs = append(errs, c.release())
+		c.release = nil
 	}
 	return errors.Join(errs...)
 }
@@ -165,6 +164,15 @@ func (c *Cleaner) start(ctx context.Context, s Strategy) (*Session, error) {
 func (c *Cleaner) ensureSetup(ctx context.Context) error {
 	c.setupOnce.Do(func() {
 		ctx := context.WithoutCancel(ctx)
+		d, err := c.resolveDialect()
+		if err != nil {
+			c.setupErr = err
+			return
+		}
+		c.dialect = d
+		if c.driver == "" {
+			c.driver = d.Driver()
+		}
 		if c.templateBuild != nil {
 			if err := c.lease(ctx); err != nil {
 				c.setupErr = fmt.Errorf("dbcleaner: lease: %w", err)
@@ -215,8 +223,8 @@ func (c *Cleaner) wipeable(ctx context.Context) (*sql.DB, error) {
 	if c.guard == nil {
 		return db, nil
 	}
-	var name string
-	if err := db.QueryRowContext(ctx, `SELECT current_database()`).Scan(&name); err != nil {
+	name, err := c.dialect.CurrentDatabase(ctx, db)
+	if err != nil {
 		return nil, fmt.Errorf("dbcleaner: read database name: %w", err)
 	}
 	if !c.guard(name) {

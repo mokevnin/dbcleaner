@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/DATA-DOG/go-txdb"
 )
@@ -35,8 +34,8 @@ func (transaction) start(ctx context.Context, c *Cleaner) (*Session, error) {
 	return &Session{db: db, clean: func(context.Context) error { return db.Close() }}, nil
 }
 
-// Truncation empties the tables with TRUNCATE ... RESTART IDENTITY CASCADE after the
-// test. Rows are committed, so any connection sees them (a server under test in
+// Truncation empties the tables with TRUNCATE after the test (the dialect decides how:
+// on PostgreSQL, RESTART IDENTITY CASCADE). Rows are committed, so any connection sees them (a server under test in
 // another process, a second pool), at the price of a slower clean and sessions that
 // must not run in parallel against one database.
 //
@@ -98,8 +97,7 @@ func (s tableStrategy) clean(ctx context.Context, c *Cleaner, db *sql.DB) error 
 		return nil
 	}
 	if s.kind == truncate {
-		_, err := db.ExecContext(ctx, `TRUNCATE TABLE `+quoteList(tables)+` RESTART IDENTITY CASCADE`)
-		if err != nil {
+		if err := c.dialect.Truncate(ctx, db, tables); err != nil {
 			return fmt.Errorf("dbcleaner: truncate: %w", err)
 		}
 		return nil
@@ -113,7 +111,7 @@ func (s tableStrategy) clean(ctx context.Context, c *Cleaner, db *sql.DB) error 
 		return fmt.Errorf("dbcleaner: delete: %w", err)
 	}
 	for _, table := range ordered {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+quote(table)); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+c.dialect.Quote(table)); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("dbcleaner: delete from %s: %w", table, err)
 		}
@@ -165,16 +163,4 @@ func (f filter) apply(tables []string) []string {
 		}
 		return len(f.only) > 0 && !slices.Contains(f.only, table)
 	})
-}
-
-func quote(identifier string) string {
-	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
-}
-
-func quoteList(identifiers []string) string {
-	quoted := make([]string, len(identifiers))
-	for i, id := range identifiers {
-		quoted[i] = quote(id)
-	}
-	return strings.Join(quoted, ", ")
 }

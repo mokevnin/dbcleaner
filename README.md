@@ -1,9 +1,13 @@
 # dbcleaner
 
-Put a PostgreSQL database back to its baseline after each Go test: a small analogue of
+Put a database back to its baseline after each Go test: a small analogue of
 Ruby's [DatabaseCleaner](https://github.com/DatabaseCleaner/database_cleaner), built on
 [go-txdb](https://github.com/DATA-DOG/go-txdb). It knows nothing about your ORM: it hands
 out a `*sql.DB` and runs one setup callback (migrations, fixtures) per process.
+
+What differs between engines is a small `Dialect` (quoting, listing tables and foreign keys,
+truncating). PostgreSQL's is in `dbcleaner/postgres`; importing it registers it for
+`postgres://` URLs. Another engine is one more package with the same six methods.
 
 ## Why?
 
@@ -69,6 +73,7 @@ import (
 	"testing"
 
 	"github.com/mokevnin/dbcleaner"
+	_ "github.com/mokevnin/dbcleaner/postgres" // the dialect for postgres:// URLs
 	"github.com/stretchr/testify/require"
 
 	"example.com/app/users"
@@ -170,12 +175,12 @@ files, say) when the schema changes; older templates are dropped.
 
 Keep what has relative dates in `WithSetup`, not in `build`: a template is built once and
 lives on. `cleaner.URL(ctx)` is the database to hand to code that opens its own connection.
-The role needs the right to create databases. In the suite this was extracted from, 131 s with
+The role needs the right to create databases, and the dialect must support leasing (PostgreSQL's does). In the suite this was extracted from, 131 s with
 `-p 1` became about 30 s.
 
 ### Scratch databases
 
-`ScratchDatabase(t, adminURL)` creates an empty, uniquely named database and drops it when
+`postgres.ScratchDatabase(t, adminURL)` creates an empty, uniquely named database and drops it when
 the test ends: for migrations on a fresh instance, and the way this package tests itself.
 
 ## How fast is it?
