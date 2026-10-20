@@ -1,4 +1,4 @@
-package pgcleaner_test
+package dbcleaner_test
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/mokevnin/pgcleaner"
+	"github.com/mokevnin/dbcleaner"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,11 +28,11 @@ func wideSchema(ctx context.Context, db *sql.DB) error {
 
 // One test's whole lifecycle against a baseline: get a database, write two rows into
 // one table, undo it.
-func benchmarkStrategy(b *testing.B, strategy pgcleaner.Strategy) {
-	url := pgcleaner.ScratchDatabase(b, serverURL(b))
-	c := pgcleaner.New(url, pgcleaner.WithStrategy(strategy), pgcleaner.WithSetup(wideSchema))
+func benchmarkStrategy(b *testing.B, strategy dbcleaner.Strategy) {
+	url := dbcleaner.ScratchDatabase(b, serverURL(b))
+	c := dbcleaner.New(url, dbcleaner.WithStrategy(strategy), dbcleaner.WithSetup(wideSchema))
 	b.Cleanup(func() { require.NoError(b, c.Close()) })
-	require.NoError(b, c.CleanWith(b.Context(), pgcleaner.Null()), "run the setup before timing")
+	require.NoError(b, c.CleanWith(b.Context(), dbcleaner.Null()), "run the setup before timing")
 
 	b.ResetTimer()
 	for range b.N {
@@ -44,16 +44,16 @@ func benchmarkStrategy(b *testing.B, strategy pgcleaner.Strategy) {
 	}
 }
 
-func BenchmarkTransaction(b *testing.B) { benchmarkStrategy(b, pgcleaner.Transaction()) }
-func BenchmarkTruncation(b *testing.B)  { benchmarkStrategy(b, pgcleaner.Truncation()) }
-func BenchmarkDeletion(b *testing.B)    { benchmarkStrategy(b, pgcleaner.Deletion()) }
+func BenchmarkTransaction(b *testing.B) { benchmarkStrategy(b, dbcleaner.Transaction()) }
+func BenchmarkTruncation(b *testing.B)  { benchmarkStrategy(b, dbcleaner.Truncation()) }
+func BenchmarkDeletion(b *testing.B)    { benchmarkStrategy(b, dbcleaner.Deletion()) }
 
 // The same lifecycle with a database per test, cloned from a migrated template.
 func BenchmarkTemplateDatabase(b *testing.B) {
 	server := serverURL(b)
-	templateURL := pgcleaner.ScratchDatabase(b, server)
-	template := pgcleaner.New(templateURL, pgcleaner.WithSetup(wideSchema))
-	require.NoError(b, template.CleanWith(b.Context(), pgcleaner.Null()))
+	templateURL := dbcleaner.ScratchDatabase(b, server)
+	template := dbcleaner.New(templateURL, dbcleaner.WithSetup(wideSchema))
+	require.NoError(b, template.CleanWith(b.Context(), dbcleaner.Null()))
 	require.NoError(b, template.Close())
 
 	admin, err := sql.Open("pgx", server)

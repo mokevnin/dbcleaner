@@ -1,4 +1,4 @@
-// Package pgcleaner puts a PostgreSQL database back to its baseline after a test,
+// Package dbcleaner puts a PostgreSQL database back to its baseline after a test,
 // the way Ruby's DatabaseCleaner does: pick a strategy, start a session, clean it.
 //
 // Three strategies are built in:
@@ -12,7 +12,7 @@
 //
 // [Null] cleans nothing. The package knows nothing about an ORM: it hands out a
 // *database/sql.DB and runs one setup callback (migrations, fixtures) per process.
-package pgcleaner
+package dbcleaner
 
 import (
 	"context"
@@ -167,7 +167,7 @@ func (c *Cleaner) ensureSetup(ctx context.Context) error {
 		ctx := context.WithoutCancel(ctx)
 		if c.templateBuild != nil {
 			if err := c.lease(ctx); err != nil {
-				c.setupErr = fmt.Errorf("pgcleaner: lease: %w", err)
+				c.setupErr = fmt.Errorf("dbcleaner: lease: %w", err)
 				return
 			}
 		}
@@ -176,12 +176,12 @@ func (c *Cleaner) ensureSetup(ctx context.Context) error {
 		}
 		db, err := sql.Open(c.driver, c.url)
 		if err != nil {
-			c.setupErr = fmt.Errorf("pgcleaner: open: %w", err)
+			c.setupErr = fmt.Errorf("dbcleaner: open: %w", err)
 			return
 		}
 		defer func() { _ = db.Close() }()
 		if err := c.setup(ctx, db); err != nil {
-			c.setupErr = fmt.Errorf("pgcleaner: setup: %w", err)
+			c.setupErr = fmt.Errorf("dbcleaner: setup: %w", err)
 		}
 	})
 	return c.setupErr
@@ -196,11 +196,11 @@ func (c *Cleaner) committing(ctx context.Context) (*sql.DB, error) {
 	}
 	db, err := sql.Open(c.driver, c.url)
 	if err != nil {
-		return nil, fmt.Errorf("pgcleaner: open: %w", err)
+		return nil, fmt.Errorf("dbcleaner: open: %w", err)
 	}
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("pgcleaner: connect: %w", err)
+		return nil, fmt.Errorf("dbcleaner: connect: %w", err)
 	}
 	c.real = db
 	return db, nil
@@ -217,10 +217,10 @@ func (c *Cleaner) wipeable(ctx context.Context) (*sql.DB, error) {
 	}
 	var name string
 	if err := db.QueryRowContext(ctx, `SELECT current_database()`).Scan(&name); err != nil {
-		return nil, fmt.Errorf("pgcleaner: read database name: %w", err)
+		return nil, fmt.Errorf("dbcleaner: read database name: %w", err)
 	}
 	if !c.guard(name) {
-		return nil, fmt.Errorf("pgcleaner: refusing to wipe database %q: the guard does not allow it (see WithGuard)", name)
+		return nil, fmt.Errorf("dbcleaner: refusing to wipe database %q: the guard does not allow it (see WithGuard)", name)
 	}
 	return db, nil
 }

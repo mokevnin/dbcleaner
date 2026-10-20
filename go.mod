@@ -1,4 +1,4 @@
-module github.com/mokevnin/pgcleaner
+module github.com/mokevnin/dbcleaner
 
 go 1.26.0
 

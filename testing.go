@@ -1,4 +1,4 @@
-package pgcleaner
+package dbcleaner
 
 import (
 	"context"
@@ -19,12 +19,12 @@ func (c *Cleaner) DB(t testing.TB) *sql.DB {
 	t.Helper()
 	s, err := c.Start(t.Context())
 	if err != nil {
-		t.Fatalf("pgcleaner: %v", err)
+		t.Fatalf("dbcleaner: %v", err)
 	}
 	t.Cleanup(func() {
 		// The test's context is already cancelled when cleanups run.
 		if err := s.Clean(context.WithoutCancel(t.Context())); err != nil {
-			t.Errorf("pgcleaner: clean: %v", err)
+			t.Errorf("dbcleaner: clean: %v", err)
 		}
 	})
 	return s.DB()
@@ -46,7 +46,7 @@ func ScratchDatabase(t testing.TB, adminURL string) string {
 
 	admin, err := sql.Open("pgx", adminURL)
 	if err != nil {
-		t.Fatalf("pgcleaner: open admin connection: %v", err)
+		t.Fatalf("dbcleaner: open admin connection: %v", err)
 	}
 	t.Cleanup(func() { _ = admin.Close() })
 
@@ -61,17 +61,17 @@ func ScratchDatabase(t testing.TB, adminURL string) string {
 	name := fmt.Sprintf("scratch_%s_%08x", readable, h.Sum32())
 
 	if _, err := admin.ExecContext(ctx, `CREATE DATABASE `+quote(name)); err != nil {
-		t.Fatalf("pgcleaner: create scratch database: %v", err)
+		t.Fatalf("dbcleaner: create scratch database: %v", err)
 	}
 	t.Cleanup(func() {
 		if _, err := admin.ExecContext(ctx, `DROP DATABASE IF EXISTS `+quote(name)+` WITH (FORCE)`); err != nil {
-			t.Errorf("pgcleaner: drop scratch database %s: %v", name, err)
+			t.Errorf("dbcleaner: drop scratch database %s: %v", name, err)
 		}
 	})
 
 	u, err := url.Parse(adminURL)
 	if err != nil {
-		t.Fatalf("pgcleaner: parse admin url: %v", err)
+		t.Fatalf("dbcleaner: parse admin url: %v", err)
 	}
 	u.Path = "/" + name
 	return u.String()

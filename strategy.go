@@ -1,4 +1,4 @@
-package pgcleaner
+package dbcleaner
 
 import (
 	"context"
@@ -29,7 +29,7 @@ func (transaction) start(ctx context.Context, c *Cleaner) (*Session, error) {
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("pgcleaner: connect: %w", err)
+		return nil, fmt.Errorf("dbcleaner: connect: %w", err)
 	}
 	// Closing the pool rolls the transaction back.
 	return &Session{db: db, clean: func(context.Context) error { return db.Close() }}, nil
@@ -100,7 +100,7 @@ func (s tableStrategy) clean(ctx context.Context, c *Cleaner, db *sql.DB) error 
 	if s.kind == truncate {
 		_, err := db.ExecContext(ctx, `TRUNCATE TABLE `+quoteList(tables)+` RESTART IDENTITY CASCADE`)
 		if err != nil {
-			return fmt.Errorf("pgcleaner: truncate: %w", err)
+			return fmt.Errorf("dbcleaner: truncate: %w", err)
 		}
 		return nil
 	}
@@ -110,12 +110,12 @@ func (s tableStrategy) clean(ctx context.Context, c *Cleaner, db *sql.DB) error 
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("pgcleaner: delete: %w", err)
+		return fmt.Errorf("dbcleaner: delete: %w", err)
 	}
 	for _, table := range ordered {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+quote(table)); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("pgcleaner: delete from %s: %w", table, err)
+			return fmt.Errorf("dbcleaner: delete from %s: %w", table, err)
 		}
 	}
 	return tx.Commit()

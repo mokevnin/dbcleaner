@@ -1,4 +1,4 @@
-package pgcleaner
+package dbcleaner
 
 import (
 	"context"
@@ -161,7 +161,7 @@ func claimWorker(ctx context.Context, conn *pgx.Conn, baseName string) (string, 
 			return name, nil
 		}
 	}
-	return "", fmt.Errorf("pgcleaner: all %d worker databases are taken", maxWorkers)
+	return "", fmt.Errorf("dbcleaner: all %d worker databases are taken", maxWorkers)
 }
 
 // cloneWorker makes the worker a copy of the template unless it already is one. The

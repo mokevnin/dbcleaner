@@ -1,4 +1,4 @@
-package pgcleaner
+package dbcleaner
 
 import (
 	"context"
@@ -33,18 +33,18 @@ func (c *Cleaner) loadSchema(ctx context.Context, db *sql.DB) (*schema, error) {
 		WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') AND NOT c.relispartition
 		ORDER BY c.relname`)
 	if err != nil {
-		return nil, fmt.Errorf("pgcleaner: list tables: %w", err)
+		return nil, fmt.Errorf("dbcleaner: list tables: %w", err)
 	}
 	defer func() { _ = tables.Close() }()
 	for tables.Next() {
 		var name string
 		if err := tables.Scan(&name); err != nil {
-			return nil, fmt.Errorf("pgcleaner: list tables: %w", err)
+			return nil, fmt.Errorf("dbcleaner: list tables: %w", err)
 		}
 		s.tables = append(s.tables, name)
 	}
 	if err := tables.Err(); err != nil {
-		return nil, fmt.Errorf("pgcleaner: list tables: %w", err)
+		return nil, fmt.Errorf("dbcleaner: list tables: %w", err)
 	}
 
 	edges, err := db.QueryContext(ctx, `
@@ -55,18 +55,18 @@ func (c *Cleaner) loadSchema(ctx context.Context, db *sql.DB) (*schema, error) {
 		JOIN pg_namespace n ON n.oid = child.relnamespace
 		WHERE co.contype = 'f' AND n.nspname = current_schema() AND child.oid <> parent.oid`)
 	if err != nil {
-		return nil, fmt.Errorf("pgcleaner: list foreign keys: %w", err)
+		return nil, fmt.Errorf("dbcleaner: list foreign keys: %w", err)
 	}
 	defer func() { _ = edges.Close() }()
 	for edges.Next() {
 		var child, parent string
 		if err := edges.Scan(&child, &parent); err != nil {
-			return nil, fmt.Errorf("pgcleaner: list foreign keys: %w", err)
+			return nil, fmt.Errorf("dbcleaner: list foreign keys: %w", err)
 		}
 		s.references[child] = append(s.references[child], parent)
 	}
 	if err := edges.Err(); err != nil {
-		return nil, fmt.Errorf("pgcleaner: list foreign keys: %w", err)
+		return nil, fmt.Errorf("dbcleaner: list foreign keys: %w", err)
 	}
 
 	c.schema = s
@@ -107,7 +107,7 @@ func (s *schema) childrenFirst(tables []string) ([]string, error) {
 		}
 	}
 	if len(ordered) != len(tables) {
-		return nil, fmt.Errorf("pgcleaner: foreign keys form a cycle among the tables to delete from; use Truncation")
+		return nil, fmt.Errorf("dbcleaner: foreign keys form a cycle among the tables to delete from; use Truncation")
 	}
 	return ordered, nil
 }

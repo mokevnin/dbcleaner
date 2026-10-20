@@ -1,4 +1,4 @@
-# pgcleaner
+# dbcleaner
 
 Put a PostgreSQL database back to its baseline after each Go test: a small analogue of
 Ruby's [DatabaseCleaner](https://github.com/DatabaseCleaner/database_cleaner), built on
@@ -34,7 +34,7 @@ test opens a transaction of its own (a `*sql.Tx` cannot be nested), or the code 
 [go-txdb](https://github.com/DATA-DOG/go-txdb) solves the hard part of the first approach: it
 is a `database/sql` driver that puts the whole connection inside one transaction, turns the
 code's own `Begin`/`Commit`/`Rollback` into savepoints, and rolls back on `Close`. The code
-under test just receives a `*sql.DB`. pgcleaner adds what is left around it, the same way
+under test just receives a `*sql.DB`. dbcleaner adds what is left around it, the same way
 DatabaseCleaner wraps Ruby's primitives: the choice between the strategies above, a setup
 step that runs once per process (migrations, fixtures), the table lists and foreign-key order
 for truncation and deletion, a guard against wiping the wrong database, and scratch databases.
@@ -68,15 +68,15 @@ import (
 	"os"
 	"testing"
 
-	"github.com/mokevnin/pgcleaner"
+	"github.com/mokevnin/dbcleaner"
 	"github.com/stretchr/testify/require"
 
 	"example.com/app/users"
 )
 
 // One Cleaner per test package.
-var cleaner = pgcleaner.New(os.Getenv("TEST_DATABASE_URL"),
-	pgcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
+var cleaner = dbcleaner.New(os.Getenv("TEST_DATABASE_URL"),
+	dbcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
 		// Once per process, committed: migrate the schema, load the fixtures.
 		return migrate(ctx, db)
 	}),
@@ -114,9 +114,9 @@ When a test cannot use the handle it is given (the code under test runs in anoth
 on its own pool), pick another strategy for that package:
 
 ```go
-var cleaner = pgcleaner.New(url,
-	pgcleaner.WithStrategy(pgcleaner.Truncation(pgcleaner.Except("countries"))),
-	pgcleaner.WithSetup(migrateAndSeed),
+var cleaner = dbcleaner.New(url,
+	dbcleaner.WithStrategy(dbcleaner.Truncation(dbcleaner.Except("countries"))),
+	dbcleaner.WithSetup(migrateAndSeed),
 )
 ```
 
@@ -124,7 +124,7 @@ One strategy before the suite, another per test, as in DatabaseCleaner's `clean_
 
 ```go
 func TestMain(m *testing.M) {
-	_ = cleaner.CleanWith(context.Background(), pgcleaner.Truncation())
+	_ = cleaner.CleanWith(context.Background(), dbcleaner.Truncation())
 	os.Exit(m.Run())
 }
 ```
@@ -150,13 +150,13 @@ binaries (the slow half of many suites). `WithTemplate` gives every process a da
 own instead:
 
 ```go
-var cleaner = pgcleaner.New(os.Getenv("DATABASE_URL"),
+var cleaner = dbcleaner.New(os.Getenv("DATABASE_URL"),
 	// The schema, built once per version into a template database.
-	pgcleaner.WithTemplate(schemaHash, func(ctx context.Context, db *sql.DB, url string) error {
+	dbcleaner.WithTemplate(schemaHash, func(ctx context.Context, db *sql.DB, url string) error {
 		return migrate(ctx, db)
 	}),
 	// What differs per process: runs on the process's own database every time.
-	pgcleaner.WithSetup(loadFixtures),
+	dbcleaner.WithSetup(loadFixtures),
 )
 ```
 
@@ -201,13 +201,13 @@ milliseconds it is the slowest and adds up over a few thousand tests.
 
 [testcontainers](https://golang.testcontainers.org) is not an alternative to any of these: it
 provisions the server (about 1.3 s for a PostgreSQL 17 container with a warm image on the same
-machine), once per suite. pgcleaner is what runs inside it, per test. Start the container in
+machine), once per suite. dbcleaner is what runs inside it, per test. Start the container in
 `TestMain`, point the `Cleaner` at it, and keep the isolation here.
 
 ## Development
 
 Tools are pinned by [mise](https://mise.jdx.dev). The suite needs a PostgreSQL server whose
-role can create databases (`PGCLEANER_TEST_URL`, default `127.0.0.1:15432`):
+role can create databases (`DBCLEANER_TEST_URL`, default `127.0.0.1:15432`):
 
 ```sh
 mise run test          # go test -race -shuffle=on

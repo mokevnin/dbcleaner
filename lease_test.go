@@ -1,4 +1,4 @@
-package pgcleaner_test
+package dbcleaner_test
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/mokevnin/pgcleaner"
+	"github.com/mokevnin/dbcleaner"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,15 +18,15 @@ func itemsSchema(ctx context.Context, db *sql.DB, _ string) error {
 	return err
 }
 
-func leasing(url, version string, build func(context.Context, *sql.DB, string) error, opts ...pgcleaner.Option) *pgcleaner.Cleaner {
-	return pgcleaner.New(url, append([]pgcleaner.Option{pgcleaner.WithTemplate(version, build)}, opts...)...)
+func leasing(url, version string, build func(context.Context, *sql.DB, string) error, opts ...dbcleaner.Option) *dbcleaner.Cleaner {
+	return dbcleaner.New(url, append([]dbcleaner.Option{dbcleaner.WithTemplate(version, build)}, opts...)...)
 }
 
 // scratchBase is a scratch database whose leased siblings (template and workers) are
 // dropped with it, and the name of that base.
 func scratchBase(t *testing.T) (url, name string) {
 	t.Helper()
-	url = pgcleaner.ScratchDatabase(t, serverURL(t))
+	url = dbcleaner.ScratchDatabase(t, serverURL(t))
 	name = databaseName(t, url)
 	t.Cleanup(func() {
 		admin, err := sql.Open("pgx", serverURL(t))
@@ -63,7 +63,7 @@ func TestProcessesStartingTogetherBuildOneTemplateAndTakeOneWorkerEach(t *testin
 	const processes = 6
 
 	urls := make([]string, processes)
-	cleaners := make([]*pgcleaner.Cleaner, processes)
+	cleaners := make([]*dbcleaner.Cleaner, processes)
 	var wg sync.WaitGroup
 	for i := range processes {
 		cleaners[i] = leasing(base, "v1", itemsSchema)
@@ -148,7 +148,7 @@ func TestAFailedBuildLeavesNoTemplateAndTheNextProcessBuildsItAgain(t *testing.T
 
 func TestSetupRunsOnTheWorkerEveryTimeNotOnTheTemplate(t *testing.T) {
 	base, _ := scratchBase(t)
-	seed := pgcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
+	seed := dbcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
 		_, err := db.ExecContext(ctx, `TRUNCATE items; INSERT INTO items (name) VALUES ('fixture')`)
 		return err
 	})
@@ -167,7 +167,7 @@ func TestSetupRunsOnTheWorkerEveryTimeNotOnTheTemplate(t *testing.T) {
 // which must end with no goroutine of its own left behind.
 func TestAFirstSessionStartedInsideASynctestBubbleLeavesNothingBehind(t *testing.T) {
 	base, _ := scratchBase(t)
-	c := leasing(base, "v1", itemsSchema, pgcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
+	c := leasing(base, "v1", itemsSchema, dbcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
 		_, err := db.ExecContext(ctx, `INSERT INTO items (name) VALUES ('fixture') ON CONFLICT DO NOTHING`)
 		return err
 	}))

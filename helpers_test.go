@@ -1,4 +1,4 @@
-package pgcleaner_test
+package dbcleaner_test
 
 import (
 	"net/url"

@@ -1,4 +1,4 @@
-package pgcleaner_test
+package dbcleaner_test
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/mokevnin/pgcleaner"
+	"github.com/mokevnin/dbcleaner"
 	"github.com/stretchr/testify/require"
 )
 
@@ -16,8 +16,8 @@ import (
 // gets its own scratch database on it.
 func serverURL(t testing.TB) string {
 	t.Helper()
-	url := os.Getenv("PGCLEANER_TEST_URL")
-	require.NotEmpty(t, url, "set PGCLEANER_TEST_URL to a PostgreSQL URL, e.g. postgres://postgres@127.0.0.1:5432/postgres")
+	url := os.Getenv("DBCLEANER_TEST_URL")
+	require.NotEmpty(t, url, "set DBCLEANER_TEST_URL to a PostgreSQL URL, e.g. postgres://postgres@127.0.0.1:5432/postgres")
 	return url
 }
 
@@ -36,11 +36,11 @@ func migrate(ctx context.Context, db *sql.DB) error {
 
 // fresh returns a cleaner over a scratch database already at the baseline schema,
 // and a second, plain connection to the same database: what another process sees.
-func fresh(t *testing.T, strategy pgcleaner.Strategy, opts ...pgcleaner.Option) (*pgcleaner.Cleaner, *sql.DB) {
+func fresh(t *testing.T, strategy dbcleaner.Strategy, opts ...dbcleaner.Option) (*dbcleaner.Cleaner, *sql.DB) {
 	t.Helper()
-	url := pgcleaner.ScratchDatabase(t, serverURL(t))
-	opts = append([]pgcleaner.Option{pgcleaner.WithStrategy(strategy), pgcleaner.WithSetup(migrate)}, opts...)
-	c := pgcleaner.New(url, opts...)
+	url := dbcleaner.ScratchDatabase(t, serverURL(t))
+	opts = append([]dbcleaner.Option{dbcleaner.WithStrategy(strategy), dbcleaner.WithSetup(migrate)}, opts...)
+	c := dbcleaner.New(url, opts...)
 	t.Cleanup(func() { require.NoError(t, c.Close()) })
 
 	other, err := sql.Open("pgx", url)
@@ -62,7 +62,7 @@ func exec(t *testing.T, db *sql.DB, query string, args ...any) {
 	require.NoError(t, err)
 }
 
-func start(t *testing.T, c *pgcleaner.Cleaner) *pgcleaner.Session {
+func start(t *testing.T, c *dbcleaner.Cleaner) *dbcleaner.Session {
 	t.Helper()
 	s, err := c.Start(t.Context())
 	require.NoError(t, err)
@@ -70,7 +70,7 @@ func start(t *testing.T, c *pgcleaner.Cleaner) *pgcleaner.Session {
 }
 
 func TestTransactionRollsBackEverythingTheSessionDid(t *testing.T) {
-	c, other := fresh(t, pgcleaner.Transaction())
+	c, other := fresh(t, dbcleaner.Transaction())
 	s := start(t, c)
 	db := s.DB()
 
@@ -98,7 +98,7 @@ func TestTransactionRollsBackEverythingTheSessionDid(t *testing.T) {
 }
 
 func TestTransactionSessionsDoNotSeeEachOther(t *testing.T) {
-	c, _ := fresh(t, pgcleaner.Transaction())
+	c, _ := fresh(t, dbcleaner.Transaction())
 	a, b := start(t, c), start(t, c)
 
 	exec(t, a.DB(), `INSERT INTO authors (name) VALUES ('Ann')`)
@@ -110,7 +110,7 @@ func TestTransactionSessionsDoNotSeeEachOther(t *testing.T) {
 }
 
 func TestTruncationCommitsThenEmptiesTablesAndRestartsIdentity(t *testing.T) {
-	c, other := fresh(t, pgcleaner.Truncation())
+	c, other := fresh(t, dbcleaner.Truncation())
 	s := start(t, c)
 
 	exec(t, s.DB(), `INSERT INTO authors (name) VALUES ('Ann')`)
@@ -125,7 +125,7 @@ func TestTruncationCommitsThenEmptiesTablesAndRestartsIdentity(t *testing.T) {
 }
 
 func TestTruncationNeverTouchesMigrationTables(t *testing.T) {
-	c, other := fresh(t, pgcleaner.Truncation())
+	c, other := fresh(t, dbcleaner.Truncation())
 	s := start(t, c)
 
 	require.NoError(t, s.Clean(t.Context()))
@@ -135,11 +135,11 @@ func TestTruncationNeverTouchesMigrationTables(t *testing.T) {
 
 func TestTruncationHonorsOnlyAndExcept(t *testing.T) {
 	for name, tc := range map[string]struct {
-		strategy      pgcleaner.Strategy
+		strategy      dbcleaner.Strategy
 		authors, tags int
 	}{
-		"only":   {pgcleaner.Truncation(pgcleaner.Only("tags")), 1, 0},
-		"except": {pgcleaner.Truncation(pgcleaner.Except("tags")), 0, 1},
+		"only":   {dbcleaner.Truncation(dbcleaner.Only("tags")), 1, 0},
+		"except": {dbcleaner.Truncation(dbcleaner.Except("tags")), 0, 1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c, other := fresh(t, tc.strategy)
@@ -156,7 +156,7 @@ func TestTruncationHonorsOnlyAndExcept(t *testing.T) {
 }
 
 func TestDeletionRemovesChildrenBeforeParentsAndKeepsSequences(t *testing.T) {
-	c, other := fresh(t, pgcleaner.Deletion())
+	c, other := fresh(t, dbcleaner.Deletion())
 	s := start(t, c)
 	exec(t, s.DB(), `INSERT INTO authors (name) VALUES ('Ann')`)
 	exec(t, s.DB(), `INSERT INTO books (author_id, title) SELECT id, 'Go' FROM authors`)
@@ -172,7 +172,7 @@ func TestDeletionRemovesChildrenBeforeParentsAndKeepsSequences(t *testing.T) {
 }
 
 func TestDeletionRefusesAForeignKeyCycle(t *testing.T) {
-	c, _ := fresh(t, pgcleaner.Deletion(), pgcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
+	c, _ := fresh(t, dbcleaner.Deletion(), dbcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
 		_, err := db.ExecContext(ctx, `
 			CREATE TABLE a (id int PRIMARY KEY, b_id int);
 			CREATE TABLE b (id int PRIMARY KEY, a_id int REFERENCES a (id));
@@ -187,7 +187,7 @@ func TestDeletionRefusesAForeignKeyCycle(t *testing.T) {
 }
 
 func TestNullCleansNothing(t *testing.T) {
-	c, other := fresh(t, pgcleaner.Null())
+	c, other := fresh(t, dbcleaner.Null())
 	s := start(t, c)
 	exec(t, s.DB(), `INSERT INTO authors (name) VALUES ('Ann')`)
 
@@ -197,18 +197,18 @@ func TestNullCleansNothing(t *testing.T) {
 }
 
 func TestCleanWithRunsAnotherStrategyOnce(t *testing.T) {
-	c, other := fresh(t, pgcleaner.Transaction())
+	c, other := fresh(t, dbcleaner.Transaction())
 	// Run the setup first: the schema does not exist before it.
-	require.NoError(t, c.CleanWith(t.Context(), pgcleaner.Null()))
+	require.NoError(t, c.CleanWith(t.Context(), dbcleaner.Null()))
 	exec(t, other, `INSERT INTO authors (name) VALUES ('Left behind by a crashed run')`)
 
-	require.NoError(t, c.CleanWith(t.Context(), pgcleaner.Truncation()))
+	require.NoError(t, c.CleanWith(t.Context(), dbcleaner.Truncation()))
 
 	require.Zero(t, count(t, other, "authors"))
 }
 
 func TestCleaningCleansWhenTheBodyFails(t *testing.T) {
-	c, other := fresh(t, pgcleaner.Truncation())
+	c, other := fresh(t, dbcleaner.Truncation())
 	boom := errors.New("boom")
 
 	err := c.Cleaning(t.Context(), func(db *sql.DB) error {
@@ -223,7 +223,7 @@ func TestCleaningCleansWhenTheBodyFails(t *testing.T) {
 func TestSetupRunsOncePerCleanerAndItsErrorFailsEverySession(t *testing.T) {
 	t.Run("once", func(t *testing.T) {
 		// The setup inserts a primary-keyed row: a second run would violate it.
-		c, other := fresh(t, pgcleaner.Transaction(), pgcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
+		c, other := fresh(t, dbcleaner.Transaction(), dbcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
 			if err := migrate(ctx, db); err != nil {
 				return err
 			}
@@ -238,7 +238,7 @@ func TestSetupRunsOncePerCleanerAndItsErrorFailsEverySession(t *testing.T) {
 
 	t.Run("failure", func(t *testing.T) {
 		boom := errors.New("migration failed")
-		c, _ := fresh(t, pgcleaner.Transaction(), pgcleaner.WithSetup(func(context.Context, *sql.DB) error { return boom }))
+		c, _ := fresh(t, dbcleaner.Transaction(), dbcleaner.WithSetup(func(context.Context, *sql.DB) error { return boom }))
 		for range 2 {
 			_, err := c.Start(t.Context())
 			require.ErrorIs(t, err, boom)
@@ -250,21 +250,21 @@ func TestTheGuardRefusesToWipeADatabaseThatDoesNotLookLikeATestOne(t *testing.T)
 	admin, err := sql.Open("pgx", serverURL(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = admin.Close() })
-	name := fmt.Sprintf("pgcleaner_keepme_%d", os.Getpid())
+	name := fmt.Sprintf("dbcleaner_keepme_%d", os.Getpid())
 	exec(t, admin, `CREATE DATABASE `+name)
 	t.Cleanup(func() {
 		_, _ = admin.ExecContext(context.WithoutCancel(t.Context()), `DROP DATABASE `+name+` WITH (FORCE)`)
 	})
 	url := replaceDatabase(t, serverURL(t), name)
 
-	for _, strategy := range []pgcleaner.Strategy{pgcleaner.Truncation(), pgcleaner.Deletion()} {
-		_, err := pgcleaner.New(url).Start(t.Context())
+	for _, strategy := range []dbcleaner.Strategy{dbcleaner.Truncation(), dbcleaner.Deletion()} {
+		_, err := dbcleaner.New(url).Start(t.Context())
 		require.NoError(t, err, "the transaction strategy wipes nothing")
 
-		_, err = pgcleaner.New(url, pgcleaner.WithStrategy(strategy)).Start(t.Context())
+		_, err = dbcleaner.New(url, dbcleaner.WithStrategy(strategy)).Start(t.Context())
 		require.ErrorContains(t, err, "refusing to wipe")
 
-		c := pgcleaner.New(url, pgcleaner.WithStrategy(strategy), pgcleaner.WithGuard(nil))
+		c := dbcleaner.New(url, dbcleaner.WithStrategy(strategy), dbcleaner.WithGuard(nil))
 		_, err = c.Start(t.Context())
 		require.NoError(t, err, "a nil guard allows it")
 		require.NoError(t, c.Close())
@@ -272,7 +272,7 @@ func TestTheGuardRefusesToWipeADatabaseThatDoesNotLookLikeATestOne(t *testing.T)
 }
 
 func TestDBCleansWhenTheTestEnds(t *testing.T) {
-	c, other := fresh(t, pgcleaner.Transaction())
+	c, other := fresh(t, dbcleaner.Transaction())
 
 	t.Run("dirties the database", func(t *testing.T) {
 		exec(t, c.DB(t), `INSERT INTO authors (name) VALUES ('Ann')`)
@@ -291,8 +291,8 @@ func TestScratchDatabaseIsEmptyUniqueAndDroppedAfterTheTest(t *testing.T) {
 
 	var first, second string
 	t.Run("creates", func(t *testing.T) {
-		first = pgcleaner.ScratchDatabase(t, serverURL(t))
-		second = pgcleaner.ScratchDatabase(t, serverURL(t))
+		first = dbcleaner.ScratchDatabase(t, serverURL(t))
+		second = dbcleaner.ScratchDatabase(t, serverURL(t))
 		require.NotEqual(t, first, second)
 
 		db, err := sql.Open("pgx", first)
