@@ -10,18 +10,17 @@ import (
 
 	gomysql "github.com/go-sql-driver/mysql"
 	"github.com/mokevnin/dbcleaner"
+	"github.com/mokevnin/dbcleaner/internal/conformance"
 	"github.com/mokevnin/dbcleaner/mysql"
 	"github.com/stretchr/testify/require"
 )
 
 // The suite needs a MySQL server whose root can create databases, e.g.
-// DBCLEANER_MYSQL_TEST_URL='root:root@tcp(127.0.0.1:3306)/'. Without it the tests are skipped.
+// DBCLEANER_MYSQL_TEST_URL='root:root@tcp(127.0.0.1:3306)/'.
 func serverDSN(t testing.TB) *gomysql.Config {
 	t.Helper()
 	raw := os.Getenv("DBCLEANER_MYSQL_TEST_URL")
-	if raw == "" {
-		t.Skip("set DBCLEANER_MYSQL_TEST_URL to a MySQL DSN to run the MySQL tests")
-	}
+	require.NotEmpty(t, raw, "set DBCLEANER_MYSQL_TEST_URL to a MySQL DSN, e.g. root:root@tcp(127.0.0.1:3306)/")
 	cfg, err := gomysql.ParseDSN(raw)
 	require.NoError(t, err)
 	return cfg
@@ -48,112 +47,65 @@ func scratch(t *testing.T, name string) string {
 	return cfg.FormatDSN()
 }
 
-func migrate(ctx context.Context, db *sql.DB) error {
+var schema = []string{
+	`CREATE TABLE schema_migrations (version varchar(20) PRIMARY KEY)`,
+	`INSERT INTO schema_migrations VALUES ('1')`,
+	`CREATE TABLE authors (id int AUTO_INCREMENT PRIMARY KEY, name text NOT NULL)`,
+	`CREATE TABLE books (id int AUTO_INCREMENT PRIMARY KEY, author_id int NOT NULL, title text NOT NULL,
+		FOREIGN KEY (author_id) REFERENCES authors (id))`,
+	`CREATE TABLE tags (id int AUTO_INCREMENT PRIMARY KEY, name text NOT NULL, parent_id int NULL,
+		FOREIGN KEY (parent_id) REFERENCES tags (id))`,
+}
+
+func TestConformance(t *testing.T) {
+	conformance.Run(t, conformance.Env{
+		Driver:  "mysql",
+		Options: []dbcleaner.Option{dbcleaner.WithDialect(mysql.Dialect())},
+		Fresh:   func(t *testing.T) string { return scratch(t, "app_test") },
+		Schema:  schema,
+	})
+}
+
+func open(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("mysql", scratch(t, "app_test"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func TestTablesLeaveViewsOut(t *testing.T) {
+	db := open(t)
 	for _, statement := range []string{
-		`CREATE TABLE schema_migrations (version varchar(20) PRIMARY KEY)`,
-		`INSERT INTO schema_migrations VALUES ('1')`,
-		`CREATE TABLE authors (id int AUTO_INCREMENT PRIMARY KEY, name text NOT NULL)`,
-		`CREATE TABLE books (id int AUTO_INCREMENT PRIMARY KEY, author_id int NOT NULL, title text NOT NULL,
-			FOREIGN KEY (author_id) REFERENCES authors (id))`,
-		`CREATE TABLE tags (id int AUTO_INCREMENT PRIMARY KEY, name text NOT NULL, parent_id int NULL,
-			FOREIGN KEY (parent_id) REFERENCES tags (id))`,
+		`CREATE TABLE plain (id int)`,
+		`CREATE VIEW plain_view AS SELECT id FROM plain`,
 	} {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
-			return err
-		}
+		_, err := db.ExecContext(t.Context(), statement)
+		require.NoError(t, err)
 	}
-	return nil
-}
-
-// fresh returns a cleaner over a scratch database at the baseline schema, and a second
-// connection to it: what another process sees.
-func fresh(t *testing.T, name string, opts ...dbcleaner.Option) (*dbcleaner.Cleaner, *sql.DB) {
-	t.Helper()
-	dsn := scratch(t, name)
-	opts = append([]dbcleaner.Option{dbcleaner.WithDialect(mysql.Dialect()), dbcleaner.WithSetup(migrate)}, opts...)
-	c := dbcleaner.New(dsn, opts...)
-	t.Cleanup(func() { require.NoError(t, c.Close()) })
-	other, err := sql.Open("mysql", dsn)
+	tables, err := mysql.Dialect().Tables(t.Context(), db)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = other.Close() })
-	return c, other
+	require.Equal(t, []string{"plain"}, tables)
 }
 
-func count(t *testing.T, db *sql.DB, table string) int {
-	t.Helper()
-	var n int
-	require.NoError(t, db.QueryRowContext(t.Context(), "SELECT count(*) FROM `"+table+"`").Scan(&n))
-	return n
-}
-
-func exec(t *testing.T, db *sql.DB, query string, args ...any) {
-	t.Helper()
-	_, err := db.ExecContext(t.Context(), query, args...)
-	require.NoError(t, err)
-}
-
-func TestTransactionRollsTheTestBack(t *testing.T) {
-	c, other := fresh(t, "app_test")
-	s, err := c.Start(t.Context())
-	require.NoError(t, err)
-	exec(t, s.DB(), `INSERT INTO authors (name) VALUES ('Le Guin')`)
-	require.Equal(t, 1, count(t, s.DB(), "authors"))
-	require.NoError(t, s.Clean(t.Context()))
-	require.Equal(t, 0, count(t, other, "authors"))
-}
-
-func TestTruncationEmptiesLinkedTablesResetsCountersAndKeepsMigrations(t *testing.T) {
-	c, other := fresh(t, "app_test", dbcleaner.WithStrategy(dbcleaner.Truncation()))
-	s, err := c.Start(t.Context())
-	require.NoError(t, err)
-	exec(t, s.DB(), `INSERT INTO authors (name) VALUES ('Le Guin')`)
-	exec(t, s.DB(), `INSERT INTO books (author_id, title) VALUES (1, 'Earthsea')`)
-	exec(t, s.DB(), `INSERT INTO tags (name) VALUES ('fantasy')`)
-	require.Equal(t, 1, count(t, other, "books"), "rows are committed")
-
-	require.NoError(t, s.Clean(t.Context()))
-	for _, table := range []string{"authors", "books", "tags"} {
-		require.Zero(t, count(t, other, table), table)
+func TestReferencesLeaveSelfReferencesOut(t *testing.T) {
+	db := open(t)
+	for _, statement := range schema {
+		_, err := db.ExecContext(t.Context(), statement)
+		require.NoError(t, err)
 	}
-	require.Equal(t, 1, count(t, other, "schema_migrations"))
-
-	exec(t, other, `INSERT INTO authors (name) VALUES ('Butler')`)
-	var id int
-	require.NoError(t, other.QueryRowContext(t.Context(), `SELECT id FROM authors`).Scan(&id))
-	require.Equal(t, 1, id, "AUTO_INCREMENT starts over")
-}
-
-func TestTruncationRestoresForeignKeyChecks(t *testing.T) {
-	c, _ := fresh(t, "app_test", dbcleaner.WithStrategy(dbcleaner.Truncation()))
-	require.NoError(t, c.CleanWith(t.Context(), dbcleaner.Truncation()))
-	s, err := c.Start(t.Context())
+	references, err := mysql.Dialect().References(t.Context(), db)
 	require.NoError(t, err)
-	_, err = s.DB().ExecContext(t.Context(), `INSERT INTO books (author_id, title) VALUES (42, 'Orphan')`)
-	require.Error(t, err, "the pool's connections check foreign keys again")
-	require.NoError(t, s.Clean(t.Context()))
+	require.Equal(t, map[string][]string{"books": {"authors"}}, references)
 }
 
-func TestDeletionGoesChildrenFirstAndSkipsSelfReferences(t *testing.T) {
-	c, other := fresh(t, "app_test", dbcleaner.WithStrategy(dbcleaner.Deletion()))
-	s, err := c.Start(t.Context())
-	require.NoError(t, err)
-	exec(t, s.DB(), `INSERT INTO authors (name) VALUES ('Le Guin')`)
-	exec(t, s.DB(), `INSERT INTO books (author_id, title) VALUES (1, 'Earthsea')`)
-	exec(t, s.DB(), `INSERT INTO tags (name, parent_id) VALUES ('root', NULL)`)
-	require.NoError(t, s.Clean(t.Context()))
-	require.Zero(t, count(t, other, "authors"))
-	require.Zero(t, count(t, other, "books"))
+func TestTheGuardGoesByTheDatabaseName(t *testing.T) {
+	c := dbcleaner.New(scratch(t, "app"), dbcleaner.WithDialect(mysql.Dialect()))
+	t.Cleanup(func() { _ = c.Close() })
+	require.ErrorContains(t, c.CleanWith(t.Context(), dbcleaner.Truncation()), "refusing to wipe database")
 }
 
-func TestTheGuardRefusesADatabaseThatIsNotForTests(t *testing.T) {
-	c, _ := fresh(t, "app", dbcleaner.WithStrategy(dbcleaner.Truncation()))
-	_, err := c.Start(t.Context())
-	require.ErrorContains(t, err, "refusing to wipe database")
-}
-
-func TestWithTemplateIsNotSupported(t *testing.T) {
-	c := dbcleaner.New("root@tcp(127.0.0.1:3306)/app_test", dbcleaner.WithDialect(mysql.Dialect()),
-		dbcleaner.WithTemplate("v1", func(context.Context, *sql.DB, string) error { return nil }))
-	_, err := c.Start(t.Context())
-	require.ErrorContains(t, err, "WithTemplate is not supported")
+func TestQuote(t *testing.T) {
+	require.Equal(t, "`order`", mysql.Dialect().Quote("order"))
+	require.Equal(t, "`we``ird`", mysql.Dialect().Quote("we`ird"))
 }

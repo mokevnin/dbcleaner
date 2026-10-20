@@ -221,9 +221,9 @@ machine), once per suite. dbcleaner is what runs inside it, per test. Start the 
 ## Development
 
 Tools are pinned by [mise](https://mise.jdx.dev). The suite needs a PostgreSQL server whose
-role can create databases (`DBCLEANER_TEST_URL`, default `127.0.0.1:15432`). The MySQL tests
-need one too (`DBCLEANER_MYSQL_TEST_URL`, a DSN such as `root:root@tcp(127.0.0.1:3306)/`) and are
-skipped without it; the SQLite tests need nothing:
+role can create databases (`DBCLEANER_TEST_URL`, default `127.0.0.1:15432`), and a MySQL one
+(`DBCLEANER_MYSQL_TEST_URL`, a DSN, default `root:root@tcp(127.0.0.1:13306)/`); the SQLite tests
+need nothing. Every dialect passes the same suite, `internal/conformance`:
 
 ```sh
 mise run test          # go test -race -shuffle=on

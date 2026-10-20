@@ -31,6 +31,13 @@ type Dialect interface {
 	Truncate(ctx context.Context, db *sql.DB, tables []string) error
 }
 
+// Deleter is a Dialect that deletes the rows of a table itself, for an engine where a plain
+// DELETE FROM does not do. [Deletion] calls it, inside its transaction, for every table.
+type Deleter interface {
+	Dialect
+	Delete(ctx context.Context, tx *sql.Tx, table string) error
+}
+
 // Leaser is a Dialect that can give a process a database of its own, cloned from a template:
 // what [WithTemplate] needs. An engine with no cheap way to clone a database leaves it out.
 type Leaser interface {

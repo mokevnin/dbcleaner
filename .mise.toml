@@ -10,9 +10,10 @@ zizmor = "latest"
 # A server whose role can create databases; the suite makes a scratch database per test.
 # CI sets its own URL, which this default must not override.
 DBCLEANER_TEST_URL = "{{ get_env(name='DBCLEANER_TEST_URL', default='postgres://postgres@127.0.0.1:15432/postgres?sslmode=disable') }}"
+DBCLEANER_MYSQL_TEST_URL = "{{ get_env(name='DBCLEANER_MYSQL_TEST_URL', default='root:root@tcp(127.0.0.1:13306)/') }}"
 
 [tasks.test]
-description = "Run the suite (needs a PostgreSQL server at DBCLEANER_TEST_URL)"
+description = "Run the suite (needs PostgreSQL at DBCLEANER_TEST_URL and MySQL at DBCLEANER_MYSQL_TEST_URL)"
 run = "go test -race -shuffle=on ./..."
 
 [tasks."check:go"]

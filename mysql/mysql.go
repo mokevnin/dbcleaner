@@ -7,6 +7,10 @@
 // MySQL commits implicitly before and after DDL, so a test running under
 // [dbcleaner.Transaction] must not create or alter tables. It does not support
 // [dbcleaner.WithTemplate]: MySQL cannot clone a database.
+//
+// Foreign keys are switched off while [dbcleaner.Truncation] runs, and while
+// [dbcleaner.Deletion] empties a table that references itself: a table that is kept and
+// references a cleaned one is left with dangling rows.
 package mysql
 
 import (
@@ -109,3 +113,39 @@ func (d dialect) Truncate(ctx context.Context, db *sql.DB, tables []string) (err
 	}
 	return nil
 }
+
+// Delete empties a table. InnoDB checks a foreign key row by row, not at the end of the
+// statement, so a table that references itself cannot be emptied with the checks on: for
+// that table alone they are off, inside the transaction, and put back as they were. Like
+// [Truncate], that leaves rows of a table that is kept, and references it, dangling.
+func (d dialect) Delete(ctx context.Context, tx *sql.Tx, table string) (err error) {
+	var selfReferencing bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.referential_constraints
+			WHERE constraint_schema = DATABASE() AND table_name = ? AND referenced_table_name = ?)`,
+		table, table).Scan(&selfReferencing)
+	if err != nil {
+		return err
+	}
+	if selfReferencing {
+		var checks int
+		if err := tx.QueryRowContext(ctx, `SELECT @@foreign_key_checks`).Scan(&checks); err != nil {
+			return err
+		}
+		if checks != 0 {
+			if _, err := tx.ExecContext(ctx, `SET foreign_key_checks = 0`); err != nil {
+				return err
+			}
+			defer func() {
+				if _, restoreErr := tx.ExecContext(ctx, `SET foreign_key_checks = 1`); err == nil {
+					err = restoreErr
+				}
+			}()
+		}
+	}
+	_, err = tx.ExecContext(ctx, `DELETE FROM `+d.Quote(table))
+	return err
+}
+
+var _ dbcleaner.Deleter = dialect{}

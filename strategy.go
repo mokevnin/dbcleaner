@@ -111,7 +111,7 @@ func (s tableStrategy) clean(ctx context.Context, c *Cleaner, db *sql.DB) error 
 		return fmt.Errorf("dbcleaner: delete: %w", err)
 	}
 	for _, table := range ordered {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+c.dialect.Quote(table)); err != nil {
+		if err := c.deleteFrom(ctx, tx, table); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("dbcleaner: delete from %s: %w", table, err)
 		}
@@ -163,4 +163,12 @@ func (f filter) apply(tables []string) []string {
 		}
 		return len(f.only) > 0 && !slices.Contains(f.only, table)
 	})
+}
+
+func (c *Cleaner) deleteFrom(ctx context.Context, tx *sql.Tx, table string) error {
+	if d, ok := c.dialect.(Deleter); ok {
+		return d.Delete(ctx, tx, table)
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM `+c.dialect.Quote(table))
+	return err
 }
