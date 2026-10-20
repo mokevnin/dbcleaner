@@ -6,8 +6,17 @@ Ruby's [DatabaseCleaner](https://github.com/DatabaseCleaner/database_cleaner), b
 out a `*sql.DB` and runs one setup callback (migrations, fixtures) per process.
 
 What differs between engines is a small `Dialect` (quoting, listing tables and foreign keys,
-truncating). PostgreSQL's is in `dbcleaner/postgres`; importing it registers it for
-`postgres://` URLs. Another engine is one more package with the same six methods.
+truncating). Import the package of your engine:
+
+| Engine | Package | Registered for | `WithTemplate` |
+|---|---|---|---|
+| PostgreSQL | `dbcleaner/postgres` | `postgres://`, `postgresql://` | yes |
+| SQLite | `dbcleaner/sqlite` | `file:` | no |
+| MySQL, MariaDB | `dbcleaner/mysql` | none: `WithDialect(mysql.Dialect())` | no |
+
+A DSN that is not a URL (`root@tcp(127.0.0.1:3306)/app_test`, a plain SQLite path) names no
+scheme, so it takes `dbcleaner.WithDialect`. Another engine is one more package with the
+same six methods. The examples below use PostgreSQL.
 
 ## Why?
 
@@ -212,7 +221,9 @@ machine), once per suite. dbcleaner is what runs inside it, per test. Start the 
 ## Development
 
 Tools are pinned by [mise](https://mise.jdx.dev). The suite needs a PostgreSQL server whose
-role can create databases (`DBCLEANER_TEST_URL`, default `127.0.0.1:15432`):
+role can create databases (`DBCLEANER_TEST_URL`, default `127.0.0.1:15432`). The MySQL tests
+need one too (`DBCLEANER_MYSQL_TEST_URL`, a DSN such as `root:root@tcp(127.0.0.1:3306)/`) and are
+skipped without it; the SQLite tests need nothing:
 
 ```sh
 mise run test          # go test -race -shuffle=on

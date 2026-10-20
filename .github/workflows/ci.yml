@@ -43,8 +43,17 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      mysql:
+        image: mysql:8.4@sha256:0f51e63e537a1f176423fa03ef559aabe6fa4372a53160a44bc7e75da7d15364
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot" --health-interval 5s --health-timeout 5s --health-retries 20
     env:
       DBCLEANER_TEST_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
+      DBCLEANER_MYSQL_TEST_URL: root:root@tcp(127.0.0.1:3306)/
 
     steps:
       - name: Checkout repository
