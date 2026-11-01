@@ -67,6 +67,25 @@ uncommitted transaction, so use `Truncation` or `Deletion` for those tests.
 `Truncation` and `Deletion` accept `Only(...)` and `Except(...)`, and never touch the
 migration bookkeeping tables of golang-migrate, goose, Atlas, river, Rails and the like.
 
+## Set up with a coding agent
+
+Copy this prompt into Claude Code, Codex, Cursor or another coding agent opened in your
+project. The agent finds how the tests isolate the database today, moves them to dbcleaner
+with the strategy each package needs and removes the helpers it replaces.
+
+```text
+Adopt dbcleaner (https://github.com/mokevnin/dbcleaner) for the database tests of this Go project. Read its README first; it explains the strategies and when each one fits.
+
+1. Find how the tests isolate the database today (hand-written transactions, truncation helpers, a database per test, `go test -p 1`, testcontainers) and which migrations and fixtures they run.
+2. Run `go get github.com/mokevnin/dbcleaner` and import the dialect package of the engine: `postgres`, `sqlite` or `mysql`.
+3. In each test package that touches the database, build one Cleaner whose `WithSetup` runs the existing migrations and fixtures, and replace the hand-written isolation with `cleaner.DB(t)`. Keep the default `Transaction` strategy. Use `Truncation` or `Deletion` only for a package whose code under test reaches the database over its own connection (a server in another process, a worker with its own pool, LISTEN/NOTIFY), and say why for each such package.
+4. On PostgreSQL, if test packages are serialized with `-p 1` or share one database, use `WithTemplate` so each process gets a database of its own, then drop `-p 1`. The database role needs the right to create databases.
+5. The committing strategies refuse a database whose name lacks `test`, `e2e` or `scratch`. Rename the test database if needed; never loosen `WithGuard` to get around it.
+6. Remove the helpers dbcleaner replaces. If the project starts its database with testcontainers, keep that and point the Cleaner at it.
+7. Add to the project's agent instructions (AGENTS.md, CLAUDE.md or whatever file the project already uses; create AGENTS.md if there is none): a test that touches the database takes its `*sql.DB` from the package's Cleaner with `cleaner.DB(t)` and never opens a transaction by hand to isolate itself.
+8. Run the whole suite twice with `-race -shuffle=on` and report the strategy of each package, what you removed, and how long the suite took before and after.
+```
+
 ## Usage
 
 A hypothetical `users` package whose `Service` takes a `*sql.DB`. The test package builds one
