@@ -169,6 +169,46 @@ transaction that does not see the first one's writes. The code under test may st
 `Begin`/`Commit`/`Rollback`: they become savepoints. Do not run sessions of the committing
 strategies in parallel against one database.
 
+### Fixtures
+
+dbcleaner does not load data; it keeps the data `WithSetup` loaded as the baseline. For the
+loading part we recommend [testfixtures](https://github.com/go-testfixtures/testfixtures): YAML
+files per table, the same idea as Rails fixtures. Its README loads them before every test; with
+dbcleaner, load them once in `WithSetup` and let each test roll back to them:
+
+```go
+import "github.com/go-testfixtures/testfixtures/v3"
+
+func loadFixtures(ctx context.Context, db *sql.DB) error {
+	fixtures, err := testfixtures.New(
+		testfixtures.Database(db),
+		testfixtures.Dialect("postgres"),
+		testfixtures.Directory("testdata/fixtures"),
+	)
+	if err != nil {
+		return err
+	}
+	return fixtures.Load()
+}
+
+var cleaner = dbcleaner.New(os.Getenv("TEST_DATABASE_URL"),
+	dbcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
+		if err := migrate(ctx, db); err != nil {
+			return err
+		}
+		return loadFixtures(ctx, db)
+	}),
+)
+```
+
+### Schema checks
+
+Tests pass against the schema the migrations build, not against what the model expects. To
+catch the two drifting apart (a field the model treats as required on a nullable column, a
+table without a primary key), we recommend [schemalens](https://github.com/mokevnin/schemalens):
+point `schemalens check` at the migrated test database with the adapter of your ORM (ent, gorm,
+bun) and it reports every disagreement with a suggested fix, as JSON, text or SARIF for CI.
+
 ### Safety
 
 `Truncation` and `Deletion` refuse to run unless the database name contains `test`, `e2e` or
