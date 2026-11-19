@@ -5,18 +5,18 @@ Ruby's [DatabaseCleaner](https://github.com/DatabaseCleaner/database_cleaner), b
 [go-txdb](https://github.com/DATA-DOG/go-txdb). It knows nothing about your ORM: it hands
 out a `*sql.DB` and runs one setup callback (migrations, fixtures) per process.
 
-What differs between engines is a small `Dialect` (quoting, listing tables and foreign keys,
-truncating). Import the package of your engine:
+What differs between engines is a `Dialect` (listing tables and foreign keys, truncating,
+deleting, locking), from the package of your engine, and every `Cleaner` is built with one:
 
-| Engine | Package | Registered for | `WithTemplate` |
+| Engine | `New(…)` | URL | Template databases |
 |---|---|---|---|
-| PostgreSQL | `dbcleaner/postgres` | `postgres://`, `postgresql://` | yes |
-| SQLite | `dbcleaner/sqlite` | `file:` | no |
-| MySQL, MariaDB | `dbcleaner/mysql` | none: `WithDialect(mysql.Dialect())` | no |
+| PostgreSQL | `postgres.Dialect()` | `postgres://…` or a key=value DSN | `postgres.WithTemplate` |
+| SQLite | `sqlite.Dialect()` | a path or `file:…` | no: a file per process is `t.TempDir()` |
+| MySQL, MariaDB | `mysql.Dialect()` | the driver's DSN, `root@tcp(127.0.0.1:3306)/app_test` | no |
 
-A DSN that is not a URL (`root@tcp(127.0.0.1:3306)/app_test`, a plain SQLite path) names no
-scheme, so it takes `dbcleaner.WithDialect`. Another engine is one more package with the
-same six methods. The examples below use PostgreSQL.
+What only one engine can do is an option of that engine's package, so asking for it on another
+does not compile. Another engine is one more package with the same methods, all of them
+required. The examples below use PostgreSQL.
 
 ## Why?
 
@@ -77,9 +77,9 @@ with the strategy each package needs and removes the helpers it replaces.
 Adopt dbcleaner (https://github.com/mokevnin/dbcleaner) for the database tests of this Go project. Read its README first; it explains the strategies and when each one fits.
 
 1. Find how the tests isolate the database today (hand-written transactions, truncation helpers, a database per test, `go test -p 1`, testcontainers) and which migrations and fixtures they run.
-2. Run `go get github.com/mokevnin/dbcleaner` and import the dialect package of the engine: `postgres`, `sqlite` or `mysql`.
+2. Run `go get github.com/mokevnin/dbcleaner/v2` and build the Cleaner with the dialect of the engine: `postgres.Dialect()`, `sqlite.Dialect()` or `mysql.Dialect()`.
 3. In each test package that touches the database, build one Cleaner whose `WithSetup` runs the existing migrations and fixtures, and replace the hand-written isolation with `cleaner.DB(t)`. Keep the default `Transaction` strategy. Use `Truncation` or `Deletion` only for a package whose code under test reaches the database over its own connection (a server in another process, a worker with its own pool, LISTEN/NOTIFY), and say why for each such package.
-4. On PostgreSQL, if test packages are serialized with `-p 1` or share one database, use `WithTemplate` so each process gets a database of its own, then drop `-p 1`. The database role needs the right to create databases.
+4. On PostgreSQL, if test packages are serialized with `-p 1` or share one database, use `postgres.WithTemplate` with the pgtestdb migrator of the project's migration tool so each process gets a database of its own, then drop `-p 1`. The database role needs the right to create databases.
 5. The committing strategies refuse a database whose name lacks `test`, `e2e` or `scratch`. Rename the test database if needed; never loosen `WithGuard` to get around it.
 6. Remove the helpers dbcleaner replaces. If the project starts its database with testcontainers, keep that and point the Cleaner at it.
 7. Add to the project's agent instructions (AGENTS.md, CLAUDE.md or whatever file the project already uses; create AGENTS.md if there is none): a test that touches the database takes its `*sql.DB` from the package's Cleaner with `cleaner.DB(t)` and never opens a transaction by hand to isolate itself.
@@ -100,15 +100,15 @@ import (
 	"os"
 	"testing"
 
-	"github.com/mokevnin/dbcleaner"
-	_ "github.com/mokevnin/dbcleaner/postgres" // the dialect for postgres:// URLs
+	"github.com/mokevnin/dbcleaner/v2"
+	"github.com/mokevnin/dbcleaner/v2/postgres"
 	"github.com/stretchr/testify/require"
 
 	"example.com/app/users"
 )
 
 // One Cleaner per test package.
-var cleaner = dbcleaner.New(os.Getenv("TEST_DATABASE_URL"),
+var cleaner = dbcleaner.New(postgres.Dialect(), os.Getenv("TEST_DATABASE_URL"),
 	dbcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
 		// Once per process, committed: migrate the schema, load the fixtures.
 		return migrate(ctx, db)
@@ -147,7 +147,7 @@ When a test cannot use the handle it is given (the code under test runs in anoth
 on its own pool), pick another strategy for that package:
 
 ```go
-var cleaner = dbcleaner.New(url,
+var cleaner = dbcleaner.New(postgres.Dialect(), url,
 	dbcleaner.WithStrategy(dbcleaner.Truncation(dbcleaner.Except("countries"))),
 	dbcleaner.WithSetup(migrateAndSeed),
 )
@@ -166,8 +166,35 @@ Without `testing`, use `Start` / `Session.Clean`, or `Cleaning(ctx, func(db *sql
 
 `Transaction` limits a session to one connection, because a second one would open a second
 transaction that does not see the first one's writes. The code under test may still call
-`Begin`/`Commit`/`Rollback`: they become savepoints. Do not run sessions of the committing
-strategies in parallel against one database.
+`Begin`/`Commit`/`Rollback`: they become savepoints.
+
+### Whatever commits takes turns
+
+The setup and the sessions of `Truncation`, `Deletion` and `Null` commit, so two of them at
+once on one database would wipe each other's rows, or see them. Each holds a lock on the
+database while it runs (a session from start to clean), and the others wait: tests of one
+package with `t.Parallel()`, other `Cleaner`s, other test processes (`go test ./...`, another
+checkout, a second CI job on a shared server). A setup waits however long it takes, like a
+migration tool's lock; a session waits until its context ends. The lock is the engine's own and
+goes away when its holder dies, however it dies:
+
+| Engine | Lock |
+|---|---|
+| PostgreSQL | `pg_advisory_lock` on a connection of its own |
+| MySQL, MariaDB | `GET_LOCK('dbcleaner:<sha1 of the database name>')` |
+| SQLite | an exclusive file lock on `<database file>-dbcleaner` (none for a database in memory) |
+
+`Transaction` sessions take no lock and never wait, once the setup is done; the lock does not
+protect them from another process's `Truncation` either, so keep the strategies of one database
+apart, or give each process its own with `postgres.WithTemplate`. A test that asks
+`cleaner.DB(t)` for a committing session while it, or the test it runs under, holds one fails at
+once: the first is cleaned when the test ends, so the second would wait for it forever.
+
+Migration tools lock their own runs (golang-migrate on PostgreSQL and MySQL, goose with
+`WithSessionLocker`), and the per-process databases of Django's `--parallel` and Ecto's
+`MIX_TEST_PARTITION` keep parallel workers apart. Neither covers what happens between
+migrations on a shared database: one process truncating while another's test writes. That is
+what this lock is for.
 
 ### Fixtures
 
@@ -191,7 +218,7 @@ func loadFixtures(ctx context.Context, db *sql.DB) error {
 	return fixtures.Load()
 }
 
-var cleaner = dbcleaner.New(os.Getenv("TEST_DATABASE_URL"),
+var cleaner = dbcleaner.New(postgres.Dialect(), os.Getenv("TEST_DATABASE_URL"),
 	dbcleaner.WithSetup(func(ctx context.Context, db *sql.DB) error {
 		if err := migrate(ctx, db); err != nil {
 			return err
@@ -219,15 +246,20 @@ with `WithGuard(func(name string) bool)`, or pass `nil` to allow everything.
 
 `go test ./...` runs one process per package. Against one database they fight over the same
 rows and locks, so the usual fix is `-p 1`, which also serializes building and linking the test
-binaries (the slow half of many suites). `WithTemplate` gives every process a database of its
-own instead:
+binaries (the slow half of many suites). On PostgreSQL, `postgres.WithTemplate` gives every
+process a database of its own instead. The schema comes from a
+[pgtestdb](https://github.com/peterldowns/pgtestdb) migrator: pgtestdb ships one for goose,
+golang-migrate, atlas, dbmate, tern, bun and plain SQL files, and those of goose and
+golang-migrate hash the migration files, so a changed migration rebuilds the template by itself.
+Your own is two methods, `Hash` and `Migrate`.
 
 ```go
-var cleaner = dbcleaner.New(os.Getenv("DATABASE_URL"),
-	// The schema, built once per version into a template database.
-	dbcleaner.WithTemplate(schemaHash, func(ctx context.Context, db *sql.DB, url string) error {
-		return migrate(ctx, db)
-	}),
+import "github.com/peterldowns/pgtestdb/migrators/goosemigrator"
+
+var cleaner = dbcleaner.New(
+	// The schema, built once per hash of the migrations into a template database.
+	postgres.Dialect(postgres.WithTemplate(goosemigrator.New("migrations"))),
+	os.Getenv("DATABASE_URL"),
 	// What differs per process: runs on the process's own database every time.
 	dbcleaner.WithSetup(loadFixtures),
 )
@@ -238,13 +270,16 @@ whichever process comes first and under an advisory lock; and `<name>_w<i>`, the
 process leases the lowest free worker with a session advisory lock, which the server releases
 when the process ends however it ends, so there is nothing to clean up and the number of
 databases stays at the number of concurrent processes. A worker is cloned from the template when
-it is missing or was cloned from an older version. Bump the version (a hash of the migration
-files, say) when the schema changes; older templates are dropped.
+it is missing or was cloned from another one; templates of older hashes are dropped. pgtestdb
+itself clones a database per test, which is exact but costs a `CREATE DATABASE` each time (see
+below); here a process clones once and its tests roll back.
 
-Keep what has relative dates in `WithSetup`, not in `build`: a template is built once and
-lives on. `cleaner.URL(ctx)` is the database to hand to code that opens its own connection.
-The role needs the right to create databases, and the dialect must support leasing (PostgreSQL's does). In the suite this was extracted from, 131 s with
-`-p 1` became about 30 s.
+Keep what has relative dates in `WithSetup`, not in the migrations: a template is built once
+and lives on. `cleaner.URL(ctx)` is the database to hand to code that opens its own connection.
+The URL must be a `postgres://` URL and its role needs the right to create databases. A
+migrator that connects by itself gets pgtestdb's `Config`, whose `URL()` does not escape the
+user and password: keep URL-special characters (`@`, `/`, `%`) out of them. In the
+suite this was extracted from, 131 s with `-p 1` became about 30 s.
 
 ### Scratch databases
 
@@ -259,16 +294,18 @@ on localhost:
 
 | Approach                            | Per test | Grows with                        |
 | ----------------------------------- | -------- | --------------------------------- |
-| `Transaction()`                     | ~3.4 ms  | nothing (mostly one connection)   |
-| `Deletion()`                        | ~1.5 ms  | tables and rows left behind       |
-| `Truncation()`                      | ~36 ms   | the number of tables              |
+| `Transaction()`                     | ~3.6 ms  | nothing (mostly one connection)   |
+| `Deletion()`                        | ~1.8 ms  | tables and rows left behind       |
+| `Truncation()`                      | ~39 ms   | the number of tables              |
 | `CREATE DATABASE … TEMPLATE` + drop | ~78 ms   | the size of the template database |
 
+The committing strategies include taking and giving back the database's lock, about 0.2 ms.
 Read it as orders of magnitude, not a ranking to copy: with two rows and a warm pool `Deletion`
 wins by a couple of milliseconds, and it loses as tests write to more tables. What does not
 change is that `Transaction` costs the same however big the schema or the test's data is, and
-it is the only one whose tests can run with `t.Parallel()` against one database (as long as
-they do not contend for the same rows), because every session has its own transaction.
+it is the only one whose tests run in parallel against one database (as long as they do not
+contend for the same rows), because every session has its own transaction: the committing
+strategies accept `t.Parallel()` but take turns.
 A database per test from a template is exact and needs no cleanup logic, but at tens of
 milliseconds it is the slowest and adds up over a few thousand tests.
 
@@ -282,7 +319,9 @@ machine), once per suite. dbcleaner is what runs inside it, per test. Start the 
 Tools are pinned by [mise](https://mise.jdx.dev). The suite needs a PostgreSQL server whose
 role can create databases (`DBCLEANER_TEST_URL`, default `127.0.0.1:15432`), and a MySQL one
 (`DBCLEANER_MYSQL_TEST_URL`, a DSN, default `root:root@tcp(127.0.0.1:13306)/`); the SQLite tests
-need nothing. Every dialect passes the same suite, `internal/conformance`:
+need nothing. Every dialect passes the same suite, `internal/conformance`, which also runs a
+second test process and kills it to check that a dead holder lets go of the database. CI runs it
+on PostgreSQL, MySQL and MariaDB, and the SQLite part on Linux, macOS and Windows:
 
 ```sh
 mise run test          # go test -race -shuffle=on

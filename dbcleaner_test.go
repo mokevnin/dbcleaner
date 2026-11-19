@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
+	"time"
 
-	"github.com/mokevnin/dbcleaner"
-	"github.com/mokevnin/dbcleaner/postgres"
+	"github.com/mokevnin/dbcleaner/v2"
+	"github.com/mokevnin/dbcleaner/v2/postgres"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,9 +41,15 @@ func migrate(ctx context.Context, db *sql.DB) error {
 // and a second, plain connection to the same database: what another process sees.
 func fresh(t *testing.T, strategy dbcleaner.Strategy, opts ...dbcleaner.Option) (*dbcleaner.Cleaner, *sql.DB) {
 	t.Helper()
+	return freshWith(t, postgres.Dialect(), strategy, opts...)
+}
+
+// freshWith is fresh with another dialect.
+func freshWith(t *testing.T, d dbcleaner.Dialect, strategy dbcleaner.Strategy, opts ...dbcleaner.Option) (*dbcleaner.Cleaner, *sql.DB) {
+	t.Helper()
 	url := postgres.ScratchDatabase(t, serverURL(t))
 	opts = append([]dbcleaner.Option{dbcleaner.WithStrategy(strategy), dbcleaner.WithSetup(migrate)}, opts...)
-	c := dbcleaner.New(url, opts...)
+	c := dbcleaner.New(d, url, opts...)
 	t.Cleanup(func() { require.NoError(t, c.Close()) })
 
 	other, err := sql.Open("pgx", url)
@@ -259,13 +267,13 @@ func TestTheGuardRefusesToWipeADatabaseThatDoesNotLookLikeATestOne(t *testing.T)
 	url := replaceDatabase(t, serverURL(t), name)
 
 	for _, strategy := range []dbcleaner.Strategy{dbcleaner.Truncation(), dbcleaner.Deletion()} {
-		_, err := dbcleaner.New(url).Start(t.Context())
+		_, err := dbcleaner.New(postgres.Dialect(), url).Start(t.Context())
 		require.NoError(t, err, "the transaction strategy wipes nothing")
 
-		_, err = dbcleaner.New(url, dbcleaner.WithStrategy(strategy)).Start(t.Context())
+		_, err = dbcleaner.New(postgres.Dialect(), url, dbcleaner.WithStrategy(strategy)).Start(t.Context())
 		require.ErrorContains(t, err, "refusing to wipe")
 
-		c := dbcleaner.New(url, dbcleaner.WithStrategy(strategy), dbcleaner.WithGuard(nil))
+		c := dbcleaner.New(postgres.Dialect(), url, dbcleaner.WithStrategy(strategy), dbcleaner.WithGuard(nil))
 		_, err = c.Start(t.Context())
 		require.NoError(t, err, "a nil guard allows it")
 		require.NoError(t, c.Close())
@@ -310,4 +318,62 @@ func TestScratchDatabaseIsEmptyUniqueAndDroppedAfterTheTest(t *testing.T) {
 		require.Error(t, db.PingContext(t.Context()), "the database is gone after its test")
 		_ = db.Close()
 	}
+}
+
+// subtest is a test called name, for asking a Cleaner for a database as a subtest would.
+type subtest struct {
+	testing.TB
+	name  string
+	fatal string
+}
+
+func (s *subtest) Name() string { return s.name }
+
+func (s *subtest) Fatalf(format string, args ...any) {
+	s.fatal = fmt.Sprintf(format, args...)
+	runtime.Goexit()
+}
+
+// requireRefusedAtOnce asks c for a database as the test called name and checks that it fails
+// at once, saying it would wait forever.
+func requireRefusedAtOnce(t *testing.T, c *dbcleaner.Cleaner, name string) {
+	t.Helper()
+	asker := &subtest{TB: t, name: name}
+	done := make(chan struct{})
+	go func() { defer close(done); c.DB(asker) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("it waits for the session its own test holds")
+	}
+	require.Contains(t, asker.fatal, "it would wait forever")
+}
+
+func TestASubtestAskingForTheDatabaseItsParentHoldsFailsAtOnce(t *testing.T) {
+	c, _ := fresh(t, dbcleaner.Truncation())
+	c.DB(t) // held until the test ends, after its subtests
+	requireRefusedAtOnce(t, c, t.Name()+"/child")
+}
+
+func TestAnotherCleanerOnTheSameDatabaseKnowsTheTestHoldsIt(t *testing.T) {
+	url := postgres.ScratchDatabase(t, serverURL(t))
+	held := dbcleaner.New(postgres.Dialect(), url, dbcleaner.WithSetup(migrate), dbcleaner.WithStrategy(dbcleaner.Deletion()))
+	t.Cleanup(func() { require.NoError(t, held.Close()) })
+	held.DB(t)
+
+	t.Run("one that commits", func(t *testing.T) {
+		c := dbcleaner.New(postgres.Dialect(), url, dbcleaner.WithStrategy(dbcleaner.Truncation()))
+		t.Cleanup(func() { require.NoError(t, c.Close()) })
+		requireRefusedAtOnce(t, c, t.Name())
+	})
+	t.Run("one whose setup has to run", func(t *testing.T) {
+		c := dbcleaner.New(postgres.Dialect(), url, dbcleaner.WithSetup(func(context.Context, *sql.DB) error { return nil }))
+		t.Cleanup(func() { require.NoError(t, c.Close()) })
+		requireRefusedAtOnce(t, c, t.Name())
+	})
+	t.Run("one that rolls back and has no setup to run", func(t *testing.T) {
+		c := dbcleaner.New(postgres.Dialect(), url)
+		t.Cleanup(func() { require.NoError(t, c.Close()) })
+		require.Zero(t, count(t, c.DB(t), "authors"))
+	})
 }

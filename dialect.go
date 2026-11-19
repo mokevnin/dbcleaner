@@ -3,21 +3,24 @@ package dbcleaner
 import (
 	"context"
 	"database/sql"
-	"fmt"
-	"net/url"
-	"sync"
 )
 
-// Dialect is what the cleaner has to ask one database engine: how to quote a name, which
-// tables there are, which of them reference which, and how to empty them. Everything else
-// is database/sql. The engines this module knows live in subpackages (dbcleaner/postgres),
-// which register themselves for their URL schemes when imported.
+// Dialect is what the cleaner has to ask one database engine: which database to work on,
+// which tables there are, which of them reference which, how to empty them and how to lock
+// the database. Everything else is database/sql. The engines this module knows live in
+// subpackages (postgres.Dialect()), and a Cleaner is built with one: [New].
+//
+// Every method is required: an engine that cannot do one says so in its code, where the
+// compiler sees it, and what only one engine can do (a template database on PostgreSQL) is
+// an option of that engine's package, not one a Cleaner of another engine could be given.
 type Dialect interface {
 	// Driver is the database/sql driver name the URL is opened with by default. The
 	// package of the dialect imports the driver.
 	Driver() string
-	// Quote quotes one identifier.
-	Quote(identifier string) string
+	// Lease returns the URL of the database the Cleaner works on, given the one it was built
+	// with: that one, or a database of this process's own. release gives back what Lease
+	// took; [Cleaner.Close] calls it. It runs once, before the setup.
+	Lease(ctx context.Context, url, driver string) (leased string, release func() error, err error)
 	// CurrentDatabase is the name of the database db is connected to, for the guard.
 	CurrentDatabase(ctx context.Context, db *sql.DB) (string, error)
 	// Tables lists the ordinary tables of the current schema, sorted, leaving out those
@@ -29,63 +32,15 @@ type Dialect interface {
 	// Truncate empties the tables, resets what counts rows (identity columns, sequences)
 	// and does not stop at a foreign key between them or to them.
 	Truncate(ctx context.Context, db *sql.DB, tables []string) error
-}
-
-// Deleter is a Dialect that deletes the rows of a table itself, for an engine where a plain
-// DELETE FROM does not do. [Deletion] calls it, inside its transaction, for every table.
-type Deleter interface {
-	Dialect
+	// Delete deletes every row of one table. [Deletion] calls it inside its transaction, for
+	// every table, children before parents; a table that references itself is the dialect's
+	// to handle.
 	Delete(ctx context.Context, tx *sql.Tx, table string) error
-}
-
-// Leaser is a Dialect that can give a process a database of its own, cloned from a template:
-// what [WithTemplate] needs. An engine with no cheap way to clone a database leaves it out.
-type Leaser interface {
-	Dialect
-	// Lease prepares the databases next to the one in rawURL as [WithTemplate] describes and
-	// returns the URL of this process's worker. release gives the lease back; it is called
-	// by [Cleaner.Close].
-	Lease(ctx context.Context, rawURL, driver, version string, build func(ctx context.Context, db *sql.DB, url string) error) (leased string, release func() error, err error)
-}
-
-var (
-	dialectsMu sync.RWMutex
-	dialects   = map[string]Dialect{}
-)
-
-// Register makes a dialect the default for the URLs of a scheme, the way database/sql
-// registers a driver: from an init function of the package that has it. It panics on a
-// scheme registered twice.
-func Register(scheme string, d Dialect) {
-	dialectsMu.Lock()
-	defer dialectsMu.Unlock()
-	if d == nil {
-		panic("dbcleaner: Register dialect is nil")
-	}
-	if _, dup := dialects[scheme]; dup {
-		panic("dbcleaner: Register called twice for scheme " + scheme)
-	}
-	dialects[scheme] = d
-}
-
-// WithDialect sets the dialect, for a URL whose scheme names none (a key=value DSN) or
-// to use another than the registered one.
-func WithDialect(d Dialect) Option { return func(c *Cleaner) { c.dialect = d } }
-
-// resolveDialect is the dialect the option set, or the one registered for the URL's scheme.
-func (c *Cleaner) resolveDialect() (Dialect, error) {
-	if c.dialect != nil {
-		return c.dialect, nil
-	}
-	u, err := url.Parse(c.url)
-	if err != nil || u.Scheme == "" {
-		return nil, fmt.Errorf("dbcleaner: the database URL names no scheme, so there is no way to tell the engine: use WithDialect")
-	}
-	dialectsMu.RLock()
-	d, ok := dialects[u.Scheme]
-	dialectsMu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("dbcleaner: no dialect for the scheme %q: import the package of the engine (dbcleaner/postgres) or use WithDialect", u.Scheme)
-	}
-	return d, nil
+	// Lock blocks until it holds the lock of the database db is connected to, or ctx ends,
+	// and unlock gives it back. It is what makes everything that commits (the setup, the
+	// sessions of the committing strategies) take turns, across connections and processes.
+	// db is a pool of its own, not the one handed to tests. The lock must be let go when its
+	// holder dies however it dies (a session lock, a file lock), so that a crashed test
+	// process never leaves it taken.
+	Lock(ctx context.Context, db *sql.DB) (unlock func() error, err error)
 }

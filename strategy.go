@@ -3,6 +3,7 @@ package dbcleaner
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -11,7 +12,7 @@ import (
 
 // Strategy is how a session undoes a test's changes.
 type Strategy interface {
-	start(ctx context.Context, c *Cleaner) (*Session, error)
+	start(ctx context.Context, c *Cleaner, owner string) (*Session, error)
 }
 
 // Transaction rolls the test back. Every session owns one connection with one open
@@ -23,7 +24,7 @@ func Transaction() Strategy { return transaction{} }
 
 type transaction struct{}
 
-func (transaction) start(ctx context.Context, c *Cleaner) (*Session, error) {
+func (transaction) start(ctx context.Context, c *Cleaner, _ string) (*Session, error) {
 	db := sql.OpenDB(txdb.New(c.driver, c.url))
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
@@ -35,9 +36,10 @@ func (transaction) start(ctx context.Context, c *Cleaner) (*Session, error) {
 }
 
 // Truncation empties the tables with TRUNCATE after the test (the dialect decides how:
-// on PostgreSQL, RESTART IDENTITY CASCADE). Rows are committed, so any connection sees them (a server under test in
-// another process, a second pool), at the price of a slower clean and sessions that
-// must not run in parallel against one database.
+// on PostgreSQL, RESTART IDENTITY CASCADE). Rows are committed, so any connection sees them
+// (a server under test in another process, a second pool), at the price of a slower clean
+// and sessions that take turns: one holds the database from start to clean, and the others
+// wait, in this process and in others (see [Cleaner.Start]).
 //
 // Migration bookkeeping tables are never truncated (see [Except]).
 func Truncation(opts ...TableOption) Strategy {
@@ -54,17 +56,22 @@ func Deletion(opts ...TableOption) Strategy {
 	return tableStrategy{kind: deletion, filter: newFilter(opts)}
 }
 
-// Null cleans nothing: the session is the committing pool, untouched afterwards.
+// Null cleans nothing: the session is the committing pool, untouched afterwards. Its rows
+// are committed, so its sessions take turns with the other committing ones all the same.
 func Null() Strategy { return null{} }
 
 type null struct{}
 
-func (null) start(ctx context.Context, c *Cleaner) (*Session, error) {
+func (null) start(ctx context.Context, c *Cleaner, owner string) (*Session, error) {
 	db, err := c.committing(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &Session{db: db, clean: func(context.Context) error { return nil }}, nil
+	unlock, err := c.lockSession(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	return &Session{db: db, clean: func(context.Context) error { return unlock() }}, nil
 }
 
 type tableKind int
@@ -79,12 +86,18 @@ type tableStrategy struct {
 	filter filter
 }
 
-func (s tableStrategy) start(ctx context.Context, c *Cleaner) (*Session, error) {
+func (s tableStrategy) start(ctx context.Context, c *Cleaner, owner string) (*Session, error) {
 	db, err := c.wipeable(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &Session{db: db, clean: func(ctx context.Context) error { return s.clean(ctx, c, db) }}, nil
+	unlock, err := c.lockSession(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	return &Session{db: db, clean: func(ctx context.Context) error {
+		return errors.Join(s.clean(ctx, c, db), unlock())
+	}}, nil
 }
 
 func (s tableStrategy) clean(ctx context.Context, c *Cleaner, db *sql.DB) error {
@@ -111,7 +124,7 @@ func (s tableStrategy) clean(ctx context.Context, c *Cleaner, db *sql.DB) error 
 		return fmt.Errorf("dbcleaner: delete: %w", err)
 	}
 	for _, table := range ordered {
-		if err := c.deleteFrom(ctx, tx, table); err != nil {
+		if err := c.dialect.Delete(ctx, tx, table); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("dbcleaner: delete from %s: %w", table, err)
 		}
@@ -163,12 +176,4 @@ func (f filter) apply(tables []string) []string {
 		}
 		return len(f.only) > 0 && !slices.Contains(f.only, table)
 	})
-}
-
-func (c *Cleaner) deleteFrom(ctx context.Context, tx *sql.Tx, table string) error {
-	if d, ok := c.dialect.(Deleter); ok {
-		return d.Delete(ctx, tx, table)
-	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM `+c.dialect.Quote(table))
-	return err
 }

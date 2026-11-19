@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	gomysql "github.com/go-sql-driver/mysql"
-	"github.com/mokevnin/dbcleaner"
-	"github.com/mokevnin/dbcleaner/internal/conformance"
-	"github.com/mokevnin/dbcleaner/mysql"
+	"github.com/mokevnin/dbcleaner/v2"
+	"github.com/mokevnin/dbcleaner/v2/internal/conformance"
+	"github.com/mokevnin/dbcleaner/v2/mysql"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,8 +59,7 @@ var schema = []string{
 
 func TestConformance(t *testing.T) {
 	conformance.Run(t, conformance.Env{
-		Driver:  "mysql",
-		Options: []dbcleaner.Option{dbcleaner.WithDialect(mysql.Dialect())},
+		Dialect: mysql.Dialect(),
 		Fresh:   func(t *testing.T) string { return scratch(t, "app_test") },
 		Schema:  schema,
 	})
@@ -100,12 +99,7 @@ func TestReferencesLeaveSelfReferencesOut(t *testing.T) {
 }
 
 func TestTheGuardGoesByTheDatabaseName(t *testing.T) {
-	c := dbcleaner.New(scratch(t, "app"), dbcleaner.WithDialect(mysql.Dialect()))
+	c := dbcleaner.New(mysql.Dialect(), scratch(t, "app"))
 	t.Cleanup(func() { _ = c.Close() })
 	require.ErrorContains(t, c.CleanWith(t.Context(), dbcleaner.Truncation()), "refusing to wipe database")
-}
-
-func TestQuote(t *testing.T) {
-	require.Equal(t, "`order`", mysql.Dialect().Quote("order"))
-	require.Equal(t, "`we``ird`", mysql.Dialect().Quote("we`ird"))
 }

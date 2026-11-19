@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/mokevnin/dbcleaner"
-	"github.com/mokevnin/dbcleaner/internal/conformance"
-	"github.com/mokevnin/dbcleaner/sqlite"
+	"github.com/mokevnin/dbcleaner/v2"
+	"github.com/mokevnin/dbcleaner/v2/internal/conformance"
+	"github.com/mokevnin/dbcleaner/v2/sqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,15 +27,15 @@ func file(t *testing.T, name string) string {
 
 func TestConformance(t *testing.T) {
 	conformance.Run(t, conformance.Env{
-		Driver: "sqlite",
-		Fresh:  func(t *testing.T) string { return file(t, "app_test.db") },
-		Schema: schema,
+		Dialect: sqlite.Dialect(),
+		Fresh:   func(t *testing.T) string { return file(t, "app_test.db") },
+		Schema:  schema,
 	})
 }
 
 func TestTheGuardGoesByTheFileName(t *testing.T) {
 	for name, allowed := range map[string]bool{"app.db": false, "app_test.db": true} {
-		c := dbcleaner.New(file(t, name))
+		c := dbcleaner.New(sqlite.Dialect(), file(t, name))
 		t.Cleanup(func() { _ = c.Close() })
 		err := c.CleanWith(t.Context(), dbcleaner.Truncation())
 		if allowed {
@@ -56,12 +56,9 @@ func TestADatabaseInMemoryPassesTheGuard(t *testing.T) {
 	require.True(t, dbcleaner.DefaultGuard(name), name)
 }
 
-func TestAPlainPathNeedsWithDialect(t *testing.T) {
+func TestAPlainPathWorksToo(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app_test.db")
-	_, err := dbcleaner.New(path).Start(t.Context())
-	require.ErrorContains(t, err, "WithDialect")
-
-	c := dbcleaner.New(path, dbcleaner.WithDialect(sqlite.Dialect()))
+	c := dbcleaner.New(sqlite.Dialect(), path)
 	t.Cleanup(func() { _ = c.Close() })
 	require.NoError(t, c.CleanWith(t.Context(), dbcleaner.Deletion()))
 }
@@ -80,9 +77,4 @@ func TestTablesLeaveInternalTablesAndViewsOut(t *testing.T) {
 	tables, err := sqlite.Dialect().Tables(t.Context(), db)
 	require.NoError(t, err)
 	require.Equal(t, []string{"plain"}, tables)
-}
-
-func TestQuote(t *testing.T) {
-	require.Equal(t, `"order"`, sqlite.Dialect().Quote("order"))
-	require.Equal(t, `"we""ird"`, sqlite.Dialect().Quote(`we"ird`))
 }

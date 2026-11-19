@@ -8,19 +8,32 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/mokevnin/dbcleaner"
-	"github.com/mokevnin/dbcleaner/postgres"
+	"github.com/mokevnin/dbcleaner/v2"
+	"github.com/mokevnin/dbcleaner/v2/postgres"
+	"github.com/peterldowns/pgtestdb"
 	"github.com/stretchr/testify/require"
 )
 
 // itemsSchema is what the template builds: a schema with nothing in it.
-func itemsSchema(ctx context.Context, db *sql.DB, _ string) error {
+func itemsSchema(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL)`)
 	return err
 }
 
-func leasing(url, version string, build func(context.Context, *sql.DB, string) error, opts ...dbcleaner.Option) *dbcleaner.Cleaner {
-	return dbcleaner.New(url, append([]dbcleaner.Option{dbcleaner.WithTemplate(version, build)}, opts...)...)
+// migrator is a pgtestdb.Migrator out of a hash and a function.
+type migrator struct {
+	hash    string
+	migrate func(ctx context.Context, db *sql.DB) error
+}
+
+func (m migrator) Hash() (string, error) { return m.hash, nil }
+
+func (m migrator) Migrate(ctx context.Context, db *sql.DB, _ pgtestdb.Config) error {
+	return m.migrate(ctx, db)
+}
+
+func leasing(url, hash string, migrate func(context.Context, *sql.DB) error, opts ...dbcleaner.Option) *dbcleaner.Cleaner {
+	return dbcleaner.New(postgres.Dialect(postgres.WithTemplate(migrator{hash, migrate})), url, opts...)
 }
 
 // scratchBase is a scratch database whose leased siblings (template and workers) are
@@ -114,7 +127,7 @@ func TestANewVersionReplacesTheTemplateAndRebuildsTheWorker(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, old.Close())
 
-	renamed := func(ctx context.Context, db *sql.DB, _ string) error {
+	renamed := func(ctx context.Context, db *sql.DB) error {
 		_, err := db.ExecContext(ctx, `CREATE TABLE things (id serial PRIMARY KEY)`)
 		return err
 	}
@@ -134,7 +147,7 @@ func TestANewVersionReplacesTheTemplateAndRebuildsTheWorker(t *testing.T) {
 func TestAFailedBuildLeavesNoTemplateAndTheNextProcessBuildsItAgain(t *testing.T) {
 	base, name := scratchBase(t)
 	boom := errors.New("migration failed")
-	failing := leasing(base, "v1", func(context.Context, *sql.DB, string) error { return boom })
+	failing := leasing(base, "v1", func(context.Context, *sql.DB) error { return boom })
 
 	_, err := failing.URL(t.Context())
 
@@ -180,6 +193,28 @@ func TestAFirstSessionStartedInsideASynctestBubbleLeavesNothingBehind(t *testing
 	// The lease outlives the bubble, as in a test process, and is not closed from outside
 	// it: a connection made inside a bubble cannot be used outside it. The scratch
 	// database is dropped with FORCE, which ends the connection.
+}
+
+// connecting is a migrator that builds the template over a connection of its own, from the
+// config, as the migrators of atlas and dbmate do.
+type connecting struct{}
+
+func (connecting) Hash() (string, error) { return "connecting", nil }
+
+func (connecting) Migrate(ctx context.Context, _ *sql.DB, conf pgtestdb.Config) error {
+	db, err := conf.Connect()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	return itemsSchema(ctx, db)
+}
+
+func TestAMigratorThatConnectsByItselfBuildsTheTemplate(t *testing.T) {
+	base, _ := scratchBase(t)
+	c := dbcleaner.New(postgres.Dialect(postgres.WithTemplate(connecting{})), base)
+	t.Cleanup(func() { require.NoError(t, c.Close()) })
+	require.Zero(t, count(t, c.DB(t), "items"))
 }
 
 func uniq(values []string) map[string]bool {
