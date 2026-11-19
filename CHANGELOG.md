@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.0.0](https://github.com/mokevnin/dbcleaner/compare/v1.0.0...v2.0.0) (2026-11-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* the module path is github.com/mokevnin/dbcleaner/v2.
+* dbcleaner.New takes the dialect first: New(postgres.Dialect(), url, ...). Register, WithDialect and the blank imports are gone.
+* dbcleaner.WithTemplate(version, build) is postgres.WithTemplate(migrator), a pgtestdb.Migrator, given to postgres.Dialect.
+* Dialect requires Lease, Delete and Lock and no longer has Quote; Leaser, Deleter and Locker are gone.
+* the setup and the sessions of Truncation, Deletion and Null take turns on a database, across tests, Cleaners and processes; DB(t) fails a request that would wait for a session its own test holds.
+
+### Features
+
+* make whatever commits take turns, and take the dialect explicitly ([715813b](https://github.com/mokevnin/dbcleaner/commit/715813b9c21c864a24952d41d7b2d41c068b7386))
+
 ## [1.0.0](https://github.com/mokevnin/dbcleaner/compare/v0.2.0...v1.0.0) (2026-10-20)
 
 
