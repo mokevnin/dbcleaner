@@ -373,9 +373,34 @@ func (e Env) runDyingHolder(t *testing.T) {
 		t.Fatalf("the child did not hold the database in time; stderr:\n%s", stderr.String())
 	}
 
-	here := dbcleaner.New(e.Dialect, url, dbcleaner.WithStrategy(dbcleaner.Truncation()))
-	t.Cleanup(func() { require.NoError(t, here.Close()) })
-	requireWaits(t, started(t.Context(), here), kill)
+	cleaner := func(opts ...dbcleaner.Option) *dbcleaner.Cleaner {
+		c := dbcleaner.New(e.Dialect, url, opts...)
+		t.Cleanup(func() { require.NoError(t, c.Close()) })
+		return c
+	}
+
+	// The turn in this process is free, so these wait in the dialect's Lock itself.
+	ctx, cancel := context.WithTimeout(t.Context(), waitBriefly)
+	defer cancel()
+	_, err = cleaner(dbcleaner.WithStrategy(dbcleaner.Truncation())).Start(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "a wait in the lock ends with its context")
+
+	var ran atomic.Bool
+	setUp = cleaner(dbcleaner.WithSetup(func(context.Context, *sql.DB) error { ran.Store(true); return nil }))
+	next := started(t.Context(), cleaner(dbcleaner.WithStrategy(dbcleaner.Truncation())))
+	nextSetUp := started(t.Context(), setUp)
+	requireWaits(t, next, func() error {
+		require.False(t, ran.Load(), "a setup ran while another process held the database")
+		return kill()
+	})
+	select {
+	case s := <-nextSetUp:
+		require.NotNil(t, s, "the session with a setup failed to start")
+		require.True(t, ran.Load())
+		require.NoError(t, s.Clean(t.Context()))
+	case <-time.After(10 * time.Second):
+		t.Fatal("the setup did not run once the other process was dead")
+	}
 }
 
 // runPattern is the -test.run pattern that runs only the test called name.
