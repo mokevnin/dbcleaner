@@ -12,16 +12,91 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/peterldowns/pgtestdb"
 )
 
 // maxWorkers bounds how many processes lease a worker database of one server at once.
 const maxWorkers = 64
 
-// Lease implements [dbcleaner.Leaser]: see [dbcleaner.WithTemplate] for what it keeps and why.
-func (dialect) Lease(ctx context.Context, rawURL, driver, version string, build func(context.Context, *sql.DB, string) error) (string, func() error, error) {
+// templateOptions is what WithTemplate was given.
+type templateOptions struct {
+	migrator pgtestdb.Migrator
+}
+
+// WithTemplate makes the Cleaner work on a database of its own instead of the one in its
+// URL, so that test processes (one per package under `go test ./...`) run in parallel without
+// sharing rows or locks. The schema comes from a [pgtestdb.Migrator]: pgtestdb has one for
+// goose, golang-migrate, atlas, dbmate, tern, bun and plain SQL files
+// (github.com/peterldowns/pgtestdb/migrators/...), and one of your own is two methods. Its
+// Hash names the schema: a changed hash builds a new template. Two kinds of database are kept next to the one in the URL,
+// called base:
+//
+//   - base_tpl_<hash>, the template, where hash is the migrator's Hash (a base too long for a
+//     63-byte name is shortened, with a hash of it). It is built once per hash, by whichever
+//     process comes first and under an advisory lock, by running Migrate on an empty
+//     database; others wait for it. A template that exists is always complete. Templates of
+//     older hashes are dropped.
+//   - base_w<i>, the workers. A process leases the lowest free index with a session advisory
+//     lock, which the server releases when the process ends, however it ends: there is no
+//     cleanup hook to forget, and the number of databases stays bounded by the number of
+//     concurrent processes. A worker is cloned from the template when it is missing or was
+//     cloned from another one, and is otherwise reused as it is.
+//
+// What differs per process belongs in [dbcleaner.WithSetup], which runs on the worker every
+// time (fixtures with relative dates, for one): it also wipes whatever an earlier process
+// left. The database to hand to code that opens its own connection is [dbcleaner.Cleaner.URL].
+//
+// The URL must be a postgres:// URL, and its role needs the right to create databases. A
+// migrator that connects by itself uses [pgtestdb.Config.URL], which does not escape the user
+// and password: keep URL-special characters out of them. A
+// Cleaner whose first session starts inside a testing/synctest bubble must be closed inside
+// it, or never: a test process just ends.
+func WithTemplate(m pgtestdb.Migrator) Option {
+	return func(d *dialect) { d.template = &templateOptions{migrator: m} }
+}
+
+// migratorConfig is the template database at rawURL as a pgtestdb migrator expects it.
+func migratorConfig(u *url.URL, driver string) pgtestdb.Config {
+	password, _ := u.User.Password()
+	host, port := u.Hostname(), u.Port()
+	if host == "" {
+		host = "localhost"
+	}
+	if port == "" {
+		port = "5432"
+	}
+	return pgtestdb.Config{
+		DriverName: driver,
+		Host:       host,
+		Port:       port,
+		User:       u.User.Username(),
+		Password:   password,
+		Database:   strings.TrimPrefix(u.Path, "/"),
+		Options:    u.RawQuery,
+	}
+}
+
+// Lease implements [dbcleaner.Dialect]: the URL itself, or with [WithTemplate], this
+// process's worker database.
+func (d dialect) Lease(ctx context.Context, rawURL, driver string) (string, func() error, error) {
+	if d.template == nil {
+		return rawURL, func() error { return nil }, nil
+	}
 	base, err := url.Parse(rawURL)
+	if err != nil || base.Scheme == "" {
+		return "", nil, fmt.Errorf("WithTemplate needs a postgres:// URL to name its databases after, not %q", rawURL)
+	}
+	m := d.template.migrator
+	version, err := m.Hash()
 	if err != nil {
-		return "", nil, fmt.Errorf("parse url: %w", err)
+		return "", nil, fmt.Errorf("hash the migrations: %w", err)
+	}
+	build := func(ctx context.Context, db *sql.DB, buildURL string) error {
+		u, err := url.Parse(buildURL)
+		if err != nil {
+			return err
+		}
+		return m.Migrate(ctx, db, migratorConfig(u, driver))
 	}
 	baseName := strings.TrimPrefix(base.Path, "/")
 	sum := sha256.Sum256([]byte(version))

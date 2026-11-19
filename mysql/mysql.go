@@ -1,12 +1,11 @@
 // Package mysql is the MySQL (and MariaDB) dialect of dbcleaner, on the go-sql-driver/mysql
-// driver. The driver's DSN is not a URL (user:pass@tcp(host:3306)/app_test), so there is no
-// scheme to register it for: pass [Dialect] to [dbcleaner.WithDialect].
+// driver:
 //
-//	dbcleaner.New("root@tcp(127.0.0.1:3306)/app_test", dbcleaner.WithDialect(mysql.Dialect()))
+//	dbcleaner.New(mysql.Dialect(), "root@tcp(127.0.0.1:3306)/app_test")
 //
 // MySQL commits implicitly before and after DDL, so a test running under
-// [dbcleaner.Transaction] must not create or alter tables. It does not support
-// [dbcleaner.WithTemplate]: MySQL cannot clone a database.
+// [dbcleaner.Transaction] must not create or alter tables. There is no template database:
+// MySQL cannot clone one.
 //
 // Foreign keys are switched off while [dbcleaner.Truncation] runs, and while
 // [dbcleaner.Deletion] empties a table that references itself: a table that is kept and
@@ -19,7 +18,7 @@ import (
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql" // the driver
-	"github.com/mokevnin/dbcleaner"
+	"github.com/mokevnin/dbcleaner/v2"
 )
 
 // Dialect is the MySQL dialect.
@@ -29,7 +28,13 @@ type dialect struct{}
 
 func (dialect) Driver() string { return "mysql" }
 
-func (dialect) Quote(identifier string) string {
+// Lease implements [dbcleaner.Dialect]: the Cleaner works on the database it was built with.
+func (dialect) Lease(_ context.Context, url, _ string) (string, func() error, error) {
+	return url, func() error { return nil }, nil
+}
+
+// quote quotes one identifier.
+func quote(identifier string) string {
 	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
 }
 
@@ -107,7 +112,7 @@ func (d dialect) Truncate(ctx context.Context, db *sql.DB, tables []string) (err
 		}()
 	}
 	for _, table := range tables {
-		if _, err := conn.ExecContext(ctx, `TRUNCATE TABLE `+d.Quote(table)); err != nil {
+		if _, err := conn.ExecContext(ctx, `TRUNCATE TABLE `+quote(table)); err != nil {
 			return err
 		}
 	}
@@ -144,8 +149,6 @@ func (d dialect) Delete(ctx context.Context, tx *sql.Tx, table string) (err erro
 			}()
 		}
 	}
-	_, err = tx.ExecContext(ctx, `DELETE FROM `+d.Quote(table))
+	_, err = tx.ExecContext(ctx, `DELETE FROM `+quote(table))
 	return err
 }
-
-var _ dbcleaner.Deleter = dialect{}

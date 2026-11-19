@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/mokevnin/dbcleaner"
-	"github.com/mokevnin/dbcleaner/postgres"
+	"github.com/mokevnin/dbcleaner/v2"
+	"github.com/mokevnin/dbcleaner/v2/postgres"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,7 +31,7 @@ func wideSchema(ctx context.Context, db *sql.DB) error {
 // one table, undo it.
 func benchmarkStrategy(b *testing.B, strategy dbcleaner.Strategy) {
 	url := postgres.ScratchDatabase(b, serverURL(b))
-	c := dbcleaner.New(url, dbcleaner.WithStrategy(strategy), dbcleaner.WithSetup(wideSchema))
+	c := dbcleaner.New(postgres.Dialect(), url, dbcleaner.WithStrategy(strategy), dbcleaner.WithSetup(wideSchema))
 	b.Cleanup(func() { require.NoError(b, c.Close()) })
 	require.NoError(b, c.CleanWith(b.Context(), dbcleaner.Null()), "run the setup before timing")
 
@@ -53,7 +53,7 @@ func BenchmarkDeletion(b *testing.B)    { benchmarkStrategy(b, dbcleaner.Deletio
 func BenchmarkTemplateDatabase(b *testing.B) {
 	server := serverURL(b)
 	templateURL := postgres.ScratchDatabase(b, server)
-	template := dbcleaner.New(templateURL, dbcleaner.WithSetup(wideSchema))
+	template := dbcleaner.New(postgres.Dialect(), templateURL, dbcleaner.WithSetup(wideSchema))
 	require.NoError(b, template.CleanWith(b.Context(), dbcleaner.Null()))
 	require.NoError(b, template.Close())
 

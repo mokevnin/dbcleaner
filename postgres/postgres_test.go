@@ -1,13 +1,15 @@
 package postgres_test
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"testing"
 
-	"github.com/mokevnin/dbcleaner"
-	"github.com/mokevnin/dbcleaner/internal/conformance"
-	"github.com/mokevnin/dbcleaner/postgres"
+	"github.com/mokevnin/dbcleaner/v2"
+	"github.com/mokevnin/dbcleaner/v2/internal/conformance"
+	"github.com/mokevnin/dbcleaner/v2/postgres"
+	"github.com/peterldowns/pgtestdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,19 +32,22 @@ var schema = []string{
 
 func TestConformance(t *testing.T) {
 	conformance.Run(t, conformance.Env{
-		Driver: "pgx",
-		Fresh:  func(t *testing.T) string { return postgres.ScratchDatabase(t, serverURL(t)) },
-		Schema: schema,
-		Leases: true,
+		Dialect: postgres.Dialect(),
+		Fresh:   func(t *testing.T) string { return postgres.ScratchDatabase(t, serverURL(t)) },
+		Schema:  schema,
 	})
 }
 
-func TestTheDialectIsRegisteredForBothSchemes(t *testing.T) {
-	for _, scheme := range []string{"postgres", "postgresql"} {
-		url := scheme + "://postgres@127.0.0.1:1/x_test"
-		_, err := dbcleaner.New(url).Start(t.Context())
-		require.NotContains(t, err.Error(), "no dialect", scheme) // it got as far as connecting
-	}
+// sqlmigrator migrates nothing.
+type sqlmigrator struct{}
+
+func (sqlmigrator) Hash() (string, error)                                   { return "none", nil }
+func (sqlmigrator) Migrate(context.Context, *sql.DB, pgtestdb.Config) error { return nil }
+
+func TestWithTemplateNeedsAURLToNameItsDatabasesAfter(t *testing.T) {
+	c := dbcleaner.New(postgres.Dialect(postgres.WithTemplate(sqlmigrator{})), "host=127.0.0.1 dbname=app_test")
+	_, err := c.Start(t.Context())
+	require.ErrorContains(t, err, "WithTemplate needs a postgres:// URL")
 }
 
 func TestTablesLeavePartitionsAndViewsOut(t *testing.T) {
@@ -76,9 +81,4 @@ func TestReferencesLeaveSelfReferencesOut(t *testing.T) {
 	references, err := postgres.Dialect().References(t.Context(), db)
 	require.NoError(t, err)
 	require.Equal(t, map[string][]string{"books": {"authors"}}, references)
-}
-
-func TestQuote(t *testing.T) {
-	require.Equal(t, `"order"`, postgres.Dialect().Quote("order"))
-	require.Equal(t, `"we""ird"`, postgres.Dialect().Quote(`we"ird`))
 }

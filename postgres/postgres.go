@@ -1,7 +1,9 @@
-// Package postgres is the PostgreSQL dialect of dbcleaner. Importing it registers the
-// dialect for postgres:// and postgresql:// URLs, and the pgx driver it opens them with:
+// Package postgres is the PostgreSQL dialect of dbcleaner, on the pgx driver:
 //
-//	import _ "github.com/mokevnin/dbcleaner/postgres"
+//	dbcleaner.New(postgres.Dialect(), "postgres://postgres@127.0.0.1/app_test")
+//
+// With [WithTemplate], every test process works on a database of its own, cloned from a
+// template.
 package postgres
 
 import (
@@ -10,23 +12,30 @@ import (
 	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // the driver
-	"github.com/mokevnin/dbcleaner"
+	"github.com/mokevnin/dbcleaner/v2"
 )
 
-func init() {
-	dbcleaner.Register("postgres", dialect{})
-	dbcleaner.Register("postgresql", dialect{})
+// Dialect is the PostgreSQL dialect. The URL may be a postgres:// URL or a key=value DSN,
+// except with [WithTemplate], which derives the names of its databases from a URL.
+func Dialect(opts ...Option) dbcleaner.Dialect {
+	var d dialect
+	for _, opt := range opts {
+		opt(&d)
+	}
+	return d
 }
 
-// Dialect is the PostgreSQL dialect, for [dbcleaner.WithDialect] when the URL is a key=value
-// DSN. It is also a [dbcleaner.Leaser].
-func Dialect() dbcleaner.Leaser { return dialect{} }
+// Option tunes the PostgreSQL dialect.
+type Option func(*dialect)
 
-type dialect struct{}
+type dialect struct {
+	// template is set by WithTemplate.
+	template *templateOptions
+}
+
+var _ dbcleaner.Dialect = dialect{}
 
 func (dialect) Driver() string { return "pgx" }
-
-func (dialect) Quote(identifier string) string { return quoteIdent(identifier) }
 
 func quoteIdent(identifier string) string {
 	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
@@ -90,5 +99,12 @@ func (dialect) Truncate(ctx context.Context, db *sql.DB, tables []string) error 
 		quoted[i] = quoteIdent(table)
 	}
 	_, err := db.ExecContext(ctx, `TRUNCATE TABLE `+strings.Join(quoted, ", ")+` RESTART IDENTITY CASCADE`)
+	return err
+}
+
+// Delete deletes the rows of the table. PostgreSQL checks a foreign key at the end of the
+// statement, so a table that references itself needs nothing more.
+func (dialect) Delete(ctx context.Context, tx *sql.Tx, table string) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM `+quoteIdent(table))
 	return err
 }

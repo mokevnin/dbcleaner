@@ -1,16 +1,13 @@
 // Package sqlite is the SQLite dialect of dbcleaner, on the pure-Go modernc.org/sqlite
-// driver. Importing it registers the dialect for file: URLs:
+// driver:
 //
-//	import _ "github.com/mokevnin/dbcleaner/sqlite"
+//	dbcleaner.New(sqlite.Dialect(), "file:"+path+"?_pragma=foreign_keys(1)")
 //
-//	dbcleaner.New("file:" + path)
-//
-// A plain path, or ":memory:", names no scheme: pass [Dialect] to [dbcleaner.WithDialect].
 // Give the database a file, not ":memory:": every connection to ":memory:" is a database of
 // its own, so the setup and the sessions would not see each other.
 //
 // SQLite has no TRUNCATE, so [dbcleaner.Truncation] deletes the rows, with the foreign keys
-// switched off, and resets AUTOINCREMENT counters. It does not support [dbcleaner.WithTemplate]:
+// switched off, and resets AUTOINCREMENT counters. There is no template database:
 // a database per process is a file per process, which t.TempDir already is.
 package sqlite
 
@@ -20,20 +17,24 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mokevnin/dbcleaner"
+	"github.com/mokevnin/dbcleaner/v2"
 	_ "modernc.org/sqlite" // the driver
 )
 
-func init() { dbcleaner.Register("file", dialect{}) }
-
-// Dialect is the SQLite dialect, for [dbcleaner.WithDialect] when the URL is a plain path.
+// Dialect is the SQLite dialect. The URL is anything the driver opens: a file: URL or a path.
 func Dialect() dbcleaner.Dialect { return dialect{} }
 
 type dialect struct{}
 
 func (dialect) Driver() string { return "sqlite" }
 
-func (dialect) Quote(identifier string) string {
+// Lease implements [dbcleaner.Dialect]: the Cleaner works on the database it was built with.
+func (dialect) Lease(_ context.Context, url, _ string) (string, func() error, error) {
+	return url, func() error { return nil }, nil
+}
+
+// quote quotes one identifier.
+func quote(identifier string) string {
 	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
 }
 
@@ -121,7 +122,7 @@ func (d dialect) Truncate(ctx context.Context, db *sql.DB, tables []string) (err
 		return err
 	}
 	for _, table := range tables {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+d.Quote(table)); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+quote(table)); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -141,4 +142,11 @@ func (d dialect) Truncate(ctx context.Context, db *sql.DB, tables []string) (err
 		}
 	}
 	return tx.Commit()
+}
+
+// Delete deletes the rows of the table. SQLite checks a foreign key at the end of the
+// statement, so a table that references itself needs nothing more.
+func (dialect) Delete(ctx context.Context, tx *sql.Tx, table string) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM `+quote(table))
+	return err
 }

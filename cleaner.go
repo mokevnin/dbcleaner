@@ -13,8 +13,9 @@
 // [Null] cleans nothing. The package knows nothing about an ORM: it hands out a
 // *database/sql.DB and runs one setup callback (migrations, fixtures) per process.
 //
-// What differs between engines is a [Dialect]; the one for a URL is picked by its scheme
-// among those the program imported (import _ "github.com/mokevnin/dbcleaner/postgres").
+// What differs between engines is a [Dialect], from the package of the engine:
+//
+//	dbcleaner.New(postgres.Dialect(), os.Getenv("TEST_DATABASE_URL"))
 package dbcleaner
 
 import (
@@ -24,6 +25,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Cleaner starts cleaning sessions against one database. Build it once per test
@@ -36,17 +38,23 @@ type Cleaner struct {
 	setup    func(context.Context, *sql.DB) error
 	guard    func(database string) bool
 
-	templateVersion string
-	templateBuild   func(ctx context.Context, db *sql.DB, url string) error
-	// release gives back the worker database lease; see WithTemplate.
-	release func() error
+	// release gives back what the dialect's Lease took.
+	release   func() error
+	leaseOnce sync.Once
+	leaseErr  error
+	turns     *turns // whose turn it is to commit to the leased database; see lock.go
 
 	setupOnce sync.Once
 	setupErr  error
+	setupDone atomic.Bool
 
 	mu     sync.Mutex
 	real   *sql.DB // the shared, committing pool of the non-transactional strategies
+	lockDB *sql.DB // the pool the database's lock is taken on; see Dialect.Lock
 	schema *schema // table and foreign-key listing, read once
+
+	heldMu sync.Mutex
+	held   map[*sync.Once]func() error // the unlocks of the sessions not cleaned yet
 }
 
 // Option tunes a Cleaner.
@@ -87,25 +95,34 @@ func DefaultGuard(database string) bool {
 	return false
 }
 
-// New returns a Cleaner for the database at url. Nothing connects until the first
-// session starts.
-func New(url string, opts ...Option) *Cleaner {
-	c := &Cleaner{url: url, strategy: Transaction(), guard: DefaultGuard}
+// New returns a Cleaner for the database at url, of the engine of the dialect. Nothing
+// connects until the first session starts.
+func New(dialect Dialect, url string, opts ...Option) *Cleaner {
+	if dialect == nil {
+		panic("dbcleaner: New with a nil Dialect")
+	}
+	c := &Cleaner{
+		dialect: dialect, url: url, strategy: Transaction(), guard: DefaultGuard,
+		held: map[*sync.Once]func() error{},
+	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	return c
 }
 
-// Close releases the shared pool the committing strategies use and the worker database
-// lease. A Cleaner that only ran [Transaction] on its own database holds nothing to close.
+// Close releases the shared pool the committing strategies use, the lock of a session that
+// was never cleaned and the worker database lease. A Cleaner that only ran [Transaction] on
+// its own database holds nothing to close.
 func (c *Cleaner) Close() error {
+	errs := []error{c.unlockAll()}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var errs []error
-	if c.real != nil {
-		errs = append(errs, c.real.Close())
-		c.real = nil
+	for _, db := range []**sql.DB{&c.real, &c.lockDB} {
+		if *db != nil {
+			errs = append(errs, (*db).Close())
+			*db = nil
+		}
 	}
 	if c.release != nil {
 		errs = append(errs, c.release())
@@ -127,8 +144,14 @@ func (s *Session) DB() *sql.DB { return s.db }
 func (s *Session) Clean(ctx context.Context) error { return s.clean(ctx) }
 
 // Start begins a session with the Cleaner's strategy.
+//
+// A session of [Truncation], [Deletion] or [Null] commits, so it holds the database's lock
+// until it is cleaned: another one, from this Cleaner, another Cleaner or another process,
+// waits for it until ctx ends. Code that starts a second one before cleaning the first waits
+// for itself; [Cleaner.DB] knows the test and fails such a request at once. [Transaction]
+// sessions take no lock and, once the setup is done, never wait.
 func (c *Cleaner) Start(ctx context.Context) (*Session, error) {
-	return c.start(ctx, c.strategy)
+	return c.start(ctx, c.strategy, "")
 }
 
 // Cleaning runs fn in a session and cleans it afterwards, even when fn fails.
@@ -144,41 +167,62 @@ func (c *Cleaner) Cleaning(ctx context.Context, fn func(db *sql.DB) error) error
 // CleanWith cleans once with the given strategy, whatever the Cleaner's own is.
 // The usual use is a [Truncation] before the suite, then [Transaction] per test.
 func (c *Cleaner) CleanWith(ctx context.Context, s Strategy) error {
-	session, err := c.start(ctx, s)
+	session, err := c.start(ctx, s, "")
 	if err != nil {
 		return err
 	}
 	return session.Clean(ctx)
 }
 
-func (c *Cleaner) start(ctx context.Context, s Strategy) (*Session, error) {
-	if err := c.ensureSetup(ctx); err != nil {
+// start starts a session; owner is the name of the test that asks for it, if one does.
+func (c *Cleaner) start(ctx context.Context, s Strategy, owner string) (*Session, error) {
+	if err := c.ready(ctx, owner); err != nil {
 		return nil, err
 	}
-	return s.start(ctx, c)
+	return s.start(ctx, c, owner)
 }
 
-// ensureSetup leases the worker database (WithTemplate) and runs the setup callback,
-// once, and remembers the error. The setup runs on a pool of its own that is closed
-// afterwards, so it leaves no goroutine behind.
-func (c *Cleaner) ensureSetup(ctx context.Context) error {
-	c.setupOnce.Do(func() {
-		ctx := context.WithoutCancel(ctx)
-		d, err := c.resolveDialect()
+// ready takes the dialect's lease and runs the setup, each once. A setup still to run
+// waits for the database's turn however long that takes, so a test whose own committing
+// session holds the turn is refused before it waits for itself.
+func (c *Cleaner) ready(ctx context.Context, owner string) error {
+	if err := c.ensureLease(ctx); err != nil {
+		return err
+	}
+	if c.setup != nil && !c.setupDone.Load() {
+		if err := c.turns.refuseNested(owner); err != nil {
+			return err
+		}
+	}
+	return c.ensureSetup(ctx)
+}
+
+// ensureLease takes the dialect's lease, once, and remembers the error.
+func (c *Cleaner) ensureLease(ctx context.Context) error {
+	c.leaseOnce.Do(func() {
+		if c.driver == "" {
+			c.driver = c.dialect.Driver()
+		}
+		leased, release, err := c.dialect.Lease(context.WithoutCancel(ctx), c.url, c.driver)
 		if err != nil {
-			c.setupErr = err
+			c.leaseErr = fmt.Errorf("dbcleaner: lease: %w", err)
 			return
 		}
-		c.dialect = d
-		if c.driver == "" {
-			c.driver = d.Driver()
-		}
-		if c.templateBuild != nil {
-			if err := c.lease(ctx); err != nil {
-				c.setupErr = fmt.Errorf("dbcleaner: lease: %w", err)
-				return
-			}
-		}
+		c.url, c.release = leased, release
+		c.turns = turnsOf(c.driver, c.url)
+	})
+	return c.leaseErr
+}
+
+// ensureSetup runs the setup callback, once, and remembers the error. The setup commits, so
+// it takes the database's turn like a committing session, and waits for it however long that
+// takes, as the template build does: a cancelled wait would be remembered as the setup's
+// error. The setup and its lock run on pools of their own that are closed afterwards, so
+// they leave no goroutine behind.
+func (c *Cleaner) ensureSetup(ctx context.Context) error {
+	c.setupOnce.Do(func() {
+		defer c.setupDone.Store(true)
+		ctx := context.WithoutCancel(ctx)
 		if c.setup == nil {
 			return
 		}
@@ -188,7 +232,21 @@ func (c *Cleaner) ensureSetup(ctx context.Context) error {
 			return
 		}
 		defer func() { _ = db.Close() }()
+		lockDB, err := sql.Open(c.driver, c.url)
+		if err != nil {
+			c.setupErr = fmt.Errorf("dbcleaner: open: %w", err)
+			return
+		}
+		defer func() { _ = lockDB.Close() }()
+		give, err := c.turns.take(ctx, c.dialect, lockDB, "")
+		if err != nil {
+			c.setupErr = fmt.Errorf("dbcleaner: setup: %w", err)
+			return
+		}
 		if err := c.setup(ctx, db); err != nil {
+			c.setupErr = fmt.Errorf("dbcleaner: setup: %w", err)
+		}
+		if err := give(); err != nil && c.setupErr == nil {
 			c.setupErr = fmt.Errorf("dbcleaner: setup: %w", err)
 		}
 	})
