@@ -6,7 +6,7 @@ require (
 	github.com/DATA-DOG/go-txdb v0.2.1
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/gofrs/flock v0.13.2
-	github.com/jackc/pgx/v5 v5.12.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/peterldowns/pgtestdb v0.1.1
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/sync v0.25.0
